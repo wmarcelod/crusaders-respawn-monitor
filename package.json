@@ -1,0 +1,23 @@
+{
+  "name": "ts-claude",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "status": "tsx src/ts-monitor.ts status",
+    "full": "tsx src/ts-monitor.ts full",
+    "monitor": "tsx src/ts-monitor.ts monitor",
+    "web": "tsx src/web-server.ts",
+    "bot": "tsx src/bot-client.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@types/node": "^25.5.2",
+    "dotenv": "^17.4.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
