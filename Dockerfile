@@ -11,13 +11,17 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 COPY respawn-aliases.json ./
 
-# Create logs directory
+# Create directories
 RUN mkdir -p logs
 
-# Default: ServerQuery mode for remote deployment
-ENV TS_MODE=serverquery
+# Copy startup script
+COPY start-monitor.sh ./
+RUN chmod +x start-monitor.sh
+
+# Default: ClientQuery mode (connects to ts3client container)
+ENV TS_MODE=clientquery
 ENV WEB_PORT=3000
 
 EXPOSE 3000
 
-CMD ["npx", "tsx", "src/web-server.ts"]
+CMD ["./start-monitor.sh"]

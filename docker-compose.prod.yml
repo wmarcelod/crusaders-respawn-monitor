@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  ts3client:
+    build:
+      context: ./ts3client
+      dockerfile: Dockerfile
+    environment:
+      - TS_NICKNAME=${TS_NICKNAME:-CrusaderMonitor}
+      - TS_SERVER=${TS_SERVER:-crusaders.expto.com.br}
+      - TS_SERVER_PORT=${TS_SERVER_PORT:-9987}
+      - TS_CQ_APIKEY=${TS_CQ_APIKEY:-CRUSADER-MONITOR-2024}
+    volumes:
+      - shared:/shared
+      - ts3data:/home/ts3user/.ts3client
+    restart: unless-stopped
+
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - TS_MODE=clientquery
+      - TS_HOST=ts3client
+      - TS_QUERY_PORT=25639
+      - TS_APIKEY=${TS_CQ_APIKEY:-CRUSADER-MONITOR-2024}
+      - WEB_PORT=3000
+    volumes:
+      - shared:/shared
+      - monitorlogs:/app/logs
+    depends_on:
+      - ts3client
+    restart: unless-stopped
+
+volumes:
+  shared:
+  ts3data:
+  monitorlogs:
