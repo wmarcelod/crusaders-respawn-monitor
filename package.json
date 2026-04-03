@@ -4,6 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "tsx src/web-server.ts",
+    "collector": "tsx src/collector.ts",
     "status": "tsx src/ts-monitor.ts status",
     "full": "tsx src/ts-monitor.ts full",
     "monitor": "tsx src/ts-monitor.ts monitor",

@@ -1,45 +1,33 @@
 /**
- * Interacts with CrusaderBot via TeamSpeak ClientQuery.
+ * Interacts with CrusaderBot via TeamSpeak.
  *
  * The bot has a permanent UID: JtyuT0YIadDhysblVvprGK/0Ces=
  * It appears with different names (CrusaderBot, ExptoBotModify) but same UID.
  *
- * Strategy: always try to communicate. Use last known clid from bot-uid.json first,
- * fall back to clientgetids, and save successful clid for next time.
+ * Now uses the shared runCommands/sendTextMessage from clientquery.ts,
+ * which handles both ClientQuery and ServerQuery modes, and respects
+ * the global connection semaphore to avoid hitting connection limits.
  */
 
-import net from "net";
 import fs from "fs";
 import path from "path";
+import net from "net";
 import dotenv from "dotenv";
+import {
+  runCommands,
+  findClientByUid,
+  decodeTSString,
+  encodeTSString,
+  getTSConnectionInfo,
+} from "./clientquery";
 
 dotenv.config();
 
-const API_KEY = process.env.TS_APIKEY || "5AEH-W5S8-NGYT-ETWX-7WPK-0FV0";
 const BOT_UID = "JtyuT0YIadDhysblVvprGK/0Ces=";
-const BOT_UID_ESCAPED = "JtyuT0YIadDhysblVvprGK\\/0Ces=";
 const BOT_UID_FILE = path.join(__dirname, "..", "bot-uid.json");
 
-function decodeTSString(str: string): string {
-  return str
-    .replace(/\\s/g, " ")
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, "\t")
-    .replace(/\\p/g, "|")
-    .replace(/\\\//g, "/");
-}
+// --- Clid persistence ---
 
-function escapeTSString(str: string): string {
-  return str
-    .replace(/ /g, "\\s")
-    .replace(/\|/g, "\\p")
-    .replace(/\//g, "\\/");
-}
-
-/**
- * Read last known clid from bot-uid.json.
- * Returns null if file doesn't exist or clid not set.
- */
 function readLastKnownClid(): number | null {
   try {
     const raw = fs.readFileSync(BOT_UID_FILE, "utf-8");
@@ -50,15 +38,12 @@ function readLastKnownClid(): number | null {
   }
 }
 
-/**
- * Save successful clid to bot-uid.json for next time.
- */
 function saveLastKnownClid(clid: number): void {
   try {
     let data: Record<string, any> = {};
     try {
       data = JSON.parse(fs.readFileSync(BOT_UID_FILE, "utf-8"));
-    } catch { /* file may not exist yet */ }
+    } catch { /* file may not exist */ }
     data.uid = BOT_UID;
     data.lastKnownClid = clid;
     data.lastSuccessAt = new Date().toISOString();
@@ -66,95 +51,25 @@ function saveLastKnownClid(clid: number): void {
   } catch { /* non-critical */ }
 }
 
-/**
- * Get the bot's current clid by its UID using clientgetids.
- * Returns null if the bot is not found.
- */
+// --- Bot lookup ---
+
 export async function getBotClidViaLookup(): Promise<number | null> {
-  return new Promise((resolve) => {
-    const client = new net.Socket();
-    client.setTimeout(8000);
-    let fullData = "";
-    let ready = false;
-    let cmdIdx = 0;
-    let timer: NodeJS.Timeout | null = null;
-    let lastLen = 0;
-    let settled = false;
-
-    const cmds = [
-      `auth apikey=${API_KEY}`,
-      `clientgetids cluid=${BOT_UID_ESCAPED}`,
-      "quit",
-    ];
-
-    function done(result: number | null) {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      client.destroy();
-      resolve(result);
-    }
-
-    function trySendNext() {
-      if (cmdIdx < cmds.length) {
-        client.write(cmds[cmdIdx++] + "\r\n");
-      }
-    }
-
-    client.connect(25639, "127.0.0.1", () => {});
-    client.on("data", (chunk) => {
-      fullData += chunk.toString();
-
-      // Detect max clients limit
-      if (fullData.includes("id=515") || fullData.includes("max\\sclients\\sprotocol\\slimit")) {
-        done(null);
-        return;
-      }
-
-      if (!ready && fullData.includes("selected")) {
-        ready = true;
-        trySendNext();
-        return;
-      }
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        if (fullData.length > lastLen) {
-          lastLen = fullData.length;
-          trySendNext();
-        }
-      }, 200);
-    });
-    client.on("close", () => {
-      if (settled) return;
-      const lines = fullData.split("\n");
-      for (const line of lines) {
-        if (line.includes("cluid=") && line.includes("clid=")) {
-          const clidMatch = line.match(/clid=(\d+)/);
-          if (clidMatch) {
-            done(parseInt(clidMatch[1]));
-            return;
-          }
-        }
-      }
-      done(null);
-    });
-    client.on("error", () => done(null));
-    client.on("timeout", () => done(null));
-  });
+  return findClientByUid(BOT_UID);
 }
 
-/** Kept for backward compat - tries last known clid first, then lookup */
 export async function getBotClid(): Promise<number | null> {
   const lastKnown = readLastKnownClid();
   if (lastKnown !== null) return lastKnown;
   return getBotClidViaLookup();
 }
 
+// --- RespInfo types ---
+
 export interface RespInfoResult {
   code: string;
   currentPlayer: string;
   currentPlayerUid: string;
-  claimTime: string; // e.g., "02:30:00"
+  claimTime: string;
   claimMinutes: number;
   nexts: Array<{
     position: number;
@@ -163,16 +78,11 @@ export interface RespInfoResult {
     claimTime: string;
     claimMinutes: number;
   }>;
-  /** Total time until respawn is completely free (current remaining + all nexts) */
   totalQueueMinutes: number;
-  /** Estimated time when respawn will be completely free */
   freeAt: string;
   rawMessages: string[];
 }
 
-/**
- * Parse a claim time string like "02:30:00" to minutes
- */
 function parseClaimTime(str: string): number {
   const parts = str.split(":");
   const h = parseInt(parts[0]) || 0;
@@ -180,9 +90,6 @@ function parseClaimTime(str: string): number {
   return h * 60 + m;
 }
 
-/**
- * Parse the bot's !respinfo response messages
- */
 function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" | "totalQueueMinutes" | "freeAt"> {
   let currentPlayer = "";
   let currentPlayerUid = "";
@@ -191,10 +98,8 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
   const nexts: RespInfoResult["nexts"] = [];
 
   for (const msg of messages) {
-    const decoded = msg;
-
-    // Parse "Ocupado por:" - try with [url] BBCode first, then plain text
-    const occupiedMatchUrl = decoded.match(
+    // Parse "Ocupado por:" - with [url] BBCode first, then plain text
+    const occupiedMatchUrl = msg.match(
       /Ocupado por:\s*\[url=client:\/\/\d+\/([^~]+)~\](.+?)\[\/url\]\s*Tempo de claim\s+(\d+:\d+:\d+)/
     );
     if (occupiedMatchUrl) {
@@ -205,8 +110,7 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
       continue;
     }
 
-    // Fallback: plain text "Ocupado por: PlayerName Tempo de claim HH:MM:SS"
-    const occupiedMatchPlain = decoded.match(
+    const occupiedMatchPlain = msg.match(
       /Ocupado por:\s*(.+?)\s+Tempo de claim\s+(\d+:\d+:\d+)/
     );
     if (occupiedMatchPlain) {
@@ -216,8 +120,8 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
       continue;
     }
 
-    // Parse "- N:" queue entries - try with [url] BBCode first, then plain text
-    const nextMatchUrl = decoded.match(
+    // Parse "- N:" queue entries
+    const nextMatchUrl = msg.match(
       /-\s*(\d+):\s*\[url=client:\/\/\d+\/([^~]+)~\](.+?)\[\/url\]\s*Tempo de claim\s+(\d+:\d+:\d+)/
     );
     if (nextMatchUrl) {
@@ -231,8 +135,7 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
       continue;
     }
 
-    // Fallback: plain text "- N: PlayerName Tempo de claim HH:MM:SS"
-    const nextMatchPlain = decoded.match(
+    const nextMatchPlain = msg.match(
       /-\s*(\d+):\s*(.+?)\s+Tempo de claim\s+(\d+:\d+:\d+)/
     );
     if (nextMatchPlain) {
@@ -250,28 +153,35 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
 }
 
 /**
- * Try to send !respinfo using a specific clid.
- * Returns collected messages or null on failure.
+ * Send !respinfo to the bot and collect responses.
+ * Opens a raw TCP connection with event listening for the bot's response.
+ * This is separate from runCommands because we need to:
+ * 1. Register for events
+ * 2. Send a message
+ * 3. Wait for async event notifications (not regular command responses)
  */
-function trySendRespInfo(
-  clid: number,
-  code: string
-): Promise<string[] | null> {
+async function sendRespInfoAndCollect(clid: number, code: string): Promise<string[] | null> {
+  const info = getTSConnectionInfo();
+
   return new Promise((resolve) => {
     const client = new net.Socket();
     client.setTimeout(12000);
     let fullData = "";
     let ready = false;
     let cmdIdx = 0;
-    let timer: NodeJS.Timeout | null = null;
-    let lastLen = 0;
     let settled = false;
+    let errorResponseCount = 0;
     const collectedMessages: string[] = [];
 
-    const escapedMsg = escapeTSString(`!respinfo ${code}`);
+    const escapedMsg = encodeTSString(`!respinfo ${code}`);
 
-    const cmds = [
-      `auth apikey=${API_KEY}`,
+    // Build auth + command sequence
+    const authCmds = info.mode === "serverquery"
+      ? [`login ${process.env.TS_QUERY_USER || "serveradmin"} ${process.env.TS_QUERY_PASS || ""}`, `use sid=${process.env.TS_VIRTUAL_SERVER || "1"}`]
+      : [`auth apikey=${process.env.TS_APIKEY || ""}`];
+
+    const allCmds = [
+      ...authCmds,
       "clientnotifyregister schandlerid=1 event=notifytextmessage",
       `sendtextmessage targetmode=1 target=${clid} msg=${escapedMsg}`,
     ];
@@ -279,44 +189,59 @@ function trySendRespInfo(
     function done(result: string[] | null) {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
       if (waitTimer) clearTimeout(waitTimer);
       client.destroy();
       resolve(result);
     }
 
     function trySendNext() {
-      if (cmdIdx < cmds.length) {
-        client.write(cmds[cmdIdx++] + "\r\n");
+      if (cmdIdx < allCmds.length) {
+        client.write(allCmds[cmdIdx++] + "\r\n");
       }
+    }
+
+    function countErrors(data: string): number {
+      let count = 0;
+      let idx = 0;
+      while ((idx = data.indexOf("error id=", idx)) !== -1) {
+        count++;
+        idx += 9;
+      }
+      return count;
     }
 
     let waitTimer: NodeJS.Timeout | null = null;
 
-    client.connect(25639, "127.0.0.1", () => {});
+    client.connect(info.port, info.host, () => {});
     client.on("data", (chunk) => {
       const text = chunk.toString();
       fullData += text;
 
-      // Detect max clients limit
+      // Detect connection limit
       if (fullData.includes("id=515") || fullData.includes("max\\sclients\\sprotocol\\slimit")) {
         done(null);
         return;
       }
 
-      if (!ready && fullData.includes("selected")) {
-        ready = true;
-        trySendNext();
-        return;
-      }
-
-      // Check for error after sendtextmessage (e.g., invalid clid)
-      if (fullData.includes("error id=512") || fullData.includes("error id=768")) {
+      // Detect auth failure
+      if (fullData.includes("id=512") || fullData.includes("id=768")) {
         done(null);
         return;
       }
 
-      // Collect bot response messages
+      // Wait for ready
+      if (!ready) {
+        const isReady = info.mode === "serverquery"
+          ? fullData.includes("ServerQuery") || fullData.includes("TS3")
+          : fullData.includes("selected");
+        if (isReady) {
+          ready = true;
+          trySendNext();
+        }
+        return;
+      }
+
+      // Collect bot response messages from events
       if (text.includes("notifytextmessage")) {
         const lines = text.split("\n");
         for (const line of lines) {
@@ -332,16 +257,15 @@ function trySendRespInfo(
         }
       }
 
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        if (fullData.length > lastLen) {
-          lastLen = fullData.length;
-          trySendNext();
-        }
-      }, 200);
+      // Send next command when previous finishes
+      const newCount = countErrors(fullData);
+      while (errorResponseCount < newCount) {
+        errorResponseCount++;
+        trySendNext();
+      }
     });
 
-    // Wait for all response messages (bot sends multiple), then clean up
+    // Wait for bot responses, then close
     waitTimer = setTimeout(() => {
       done(collectedMessages.length > 0 ? collectedMessages : null);
     }, 5000);
@@ -352,51 +276,42 @@ function trySendRespInfo(
 }
 
 /**
- * Send !respinfo to the bot and parse the response.
- * Tries last known clid first, falls back to clientgetids lookup.
- * @param code - The respawn code, e.g., "201a"
- * @param currentRemainingMin - How many minutes the current occupant has left (from the TS channel data)
+ * Query !respinfo from the bot.
+ * Tries last known clid first, then lookup by UID.
  */
 export async function queryRespInfo(
   code: string,
   currentRemainingMin?: number
 ): Promise<RespInfoResult | null> {
-  // Strategy: try lastKnownClid first, then clientgetids
   const lastKnown = readLastKnownClid();
   let messages: string[] | null = null;
   let usedClid: number | null = null;
 
   // Attempt 1: last known clid
   if (lastKnown !== null) {
-    messages = await trySendRespInfo(lastKnown, code);
+    messages = await sendRespInfoAndCollect(lastKnown, code);
     if (messages) usedClid = lastKnown;
   }
 
-  // Attempt 2: clientgetids lookup
+  // Attempt 2: lookup by UID
   if (!messages) {
     const lookupClid = await getBotClidViaLookup();
     if (lookupClid !== null && lookupClid !== lastKnown) {
-      messages = await trySendRespInfo(lookupClid, code);
+      messages = await sendRespInfoAndCollect(lookupClid, code);
       if (messages) usedClid = lookupClid;
     }
   }
 
-  // No response from either attempt
-  if (!messages || !usedClid) {
-    return null;
-  }
+  if (!messages || !usedClid) return null;
 
-  // Save successful clid for next time
   saveLastKnownClid(usedClid);
 
   const parsed = parseRespInfoMessages(messages);
 
-  // Calculate total queue time
   const remaining = currentRemainingMin ?? parsed.claimMinutes;
   const nextsTotal = parsed.nexts.reduce((sum, n) => sum + n.claimMinutes, 0);
   const totalQueueMinutes = remaining + nextsTotal;
 
-  // Calculate estimated free time
   const now = new Date();
   const freeDate = new Date(now.getTime() + totalQueueMinutes * 60 * 1000);
   const freeAt = `${String(freeDate.getHours()).padStart(2, "0")}:${String(freeDate.getMinutes()).padStart(2, "0")}`;
@@ -409,10 +324,13 @@ export async function queryRespInfo(
   };
 }
 
-// CLI interface
+// --- CLI ---
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] || "find";
+  const info = getTSConnectionInfo();
+  console.log(`Mode: ${info.mode} | Host: ${info.host}:${info.port}\n`);
 
   switch (command) {
     case "find": {
@@ -422,26 +340,25 @@ async function main() {
       if (clid) {
         console.log(`Bot encontrado! CLID atual: ${clid}`);
       } else {
-        console.log("Bot nao encontrado. Pode estar offline ou com clid diferente.");
+        console.log("Bot nao encontrado. Pode estar offline.");
       }
       break;
     }
 
     case "respinfo": {
-      const code = args[1];
-      if (!code) {
+      const respCode = args[1];
+      if (!respCode) {
         console.log("Uso: npm run bot respinfo <codigo>");
-        console.log("Ex:  npm run bot respinfo 201a");
         break;
       }
-      console.log(`Consultando !respinfo ${code}...\n`);
-      const result = await queryRespInfo(code);
+      console.log(`Consultando !respinfo ${respCode}...\n`);
+      const result = await queryRespInfo(respCode);
       if (!result) {
         console.log("Sem resposta do bot.");
         break;
       }
 
-      console.log(`Respawn ${code}:`);
+      console.log(`Respawn ${respCode}:`);
       console.log(`  Ocupado por: ${result.currentPlayer}`);
       console.log(`  Tempo de claim: ${result.claimTime} (${result.claimMinutes}min)`);
 
@@ -450,11 +367,9 @@ async function main() {
         for (const n of result.nexts) {
           console.log(`    ${n.position}. ${n.player} - claim: ${n.claimTime} (${n.claimMinutes}min)`);
         }
-      } else {
-        console.log("  Sem fila.");
       }
 
-      console.log(`\n  Tempo total na fila: ${result.totalQueueMinutes}min`);
+      console.log(`\n  Tempo total: ${result.totalQueueMinutes}min`);
       console.log(`  Respawn livre as: ~${result.freeAt}`);
       break;
     }
@@ -466,7 +381,6 @@ async function main() {
   }
 }
 
-// Only run CLI when executed directly (not when imported as module)
 if (require.main === module) {
   main().catch(console.error);
 }
