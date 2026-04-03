@@ -64,17 +64,17 @@ export function getTrackedClient(nickname: string): TrackedClient | null {
  * Start the background client tracker.
  * Call once from web-server.ts at startup.
  */
-export function startClientTracker(apiKey: string): void {
+export function startClientTracker(): void {
   console.log("[ClientTracker] Starting background tracker (poll every 30s, first poll in 10s)");
 
   // Delay first poll to let the main server connect first
   setTimeout(() => {
-    pollClients(apiKey);
+    pollClients();
   }, 10_000);
 
   // Schedule recurring poll
   pollingTimer = setInterval(() => {
-    pollClients(apiKey);
+    pollClients();
   }, POLL_INTERVAL_MS);
 }
 
@@ -91,9 +91,9 @@ export function stopClientTracker(): void {
 /**
  * Poll all TS clients and update tracked state.
  */
-async function pollClients(apiKey: string): Promise<void> {
+async function pollClients(): Promise<void> {
   try {
-    const clients = await getAllClients(apiKey);
+    const clients = await getAllClients();
     const now = new Date();
     const seenNicknames = new Set<string>();
 

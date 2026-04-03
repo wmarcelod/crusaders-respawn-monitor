@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  dashboard:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - TS_MODE=serverquery
+      - TS_HOST=${TS_HOST}
+      - TS_QUERY_PORT=${TS_QUERY_PORT:-10011}
+      - TS_QUERY_USER=${TS_QUERY_USER:-serveradmin}
+      - TS_QUERY_PASS=${TS_QUERY_PASS}
+      - TS_VIRTUAL_SERVER=${TS_VIRTUAL_SERVER:-1}
+      - WEB_PORT=3000
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped

@@ -22,11 +22,11 @@ import { queryRespInfo, RespInfoResult } from "./bot-client";
 import { processSnapshot, getLogStats, getPlayerProfile, getRespawnHistory, getPlayerRespawnHistory, RespawnLogEntry, PlayerProfile } from "./respawn-logger";
 import { fetchCharacter, fetchCharacterFull, fetchCharacters, extractCharNames, shortVocation, TibiaCharacter, TibiaCharacterFull } from "./tibia-api";
 import { startClientTracker, getTrackedClients, getTrackedClient } from "./client-tracker";
+import { getTSConnectionInfo } from "./clientquery";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const API_KEY = process.env.TS_APIKEY || "5AEH-W5S8-NGYT-ETWX-7WPK-0FV0";
 const WEB_PORT = parseInt(process.env.WEB_PORT || "3000");
 
 // Cache
@@ -127,9 +127,9 @@ async function fetchRespInfoCached(code: string, remainingMin?: number, forceRef
 async function fetchCatalog(): Promise<RespawnCatalog> {
   if (cachedCatalog) return cachedCatalog;
   try {
-    const numCh = await findRespawnNumberChannel(API_KEY);
+    const numCh = await findRespawnNumberChannel();
     if (!numCh) return {};
-    const desc = await getChannelDescription(numCh.cid, API_KEY);
+    const desc = await getChannelDescription(numCh.cid);
     if (!desc || desc.trim().length === 0) {
       console.log("[Catalog] Channel description is empty, skipping catalog");
       return {};
@@ -187,10 +187,10 @@ async function fetchAllData(): Promise<{
 }> {
   const now = Date.now();
 
-  // Serialize TS ClientQuery calls to avoid hitting the max connections limit.
-  // Google Sheets can run in parallel since it doesn't use ClientQuery.
-  const reservationsPromise = fetchReservationsCached(); // runs in parallel (HTTP, not TS)
-  const channel = await findRespawnListChannel(API_KEY);
+  // Serialize TS calls (semaphore in clientquery.ts handles this).
+  // Google Sheets runs in parallel since it's HTTP, not TS.
+  const reservationsPromise = fetchReservationsCached();
+  const channel = await findRespawnListChannel();
   const catalog = await fetchCatalog();
   const reservations = await reservationsPromise;
 
@@ -203,7 +203,7 @@ async function fetchAllData(): Promise<{
   if (cachedData && now - lastFetch < CACHE_MS) {
     respawns = cachedData;
   } else {
-    const desc = await getChannelDescription(channel.cid, API_KEY);
+    const desc = await getChannelDescription(channel.cid);
     respawns = parseRespawnList(desc, catalog);
     cachedData = respawns;
     lastFetch = now;
@@ -2581,11 +2581,16 @@ async function main(): Promise<void> {
     });
   });
 
-  // Start the background client tracker (fetches ALL TS clients + Tibia data)
-  startClientTracker(API_KEY);
+  const tsInfo = getTSConnectionInfo();
+  console.log(`[TS] Mode: ${tsInfo.mode} | Host: ${tsInfo.host}:${tsInfo.port}`);
+
+  // Start background client tracker (polls TS for connected users)
+  startClientTracker();
 
   server.listen(WEB_PORT, () => {
     console.log("Crusaders Respawn Monitor");
+    console.log(`TS Mode:   ${tsInfo.mode.toUpperCase()}`);
+    console.log(`TS Host:   ${tsInfo.host}:${tsInfo.port}`);
     console.log(`Dashboard: http://localhost:${WEB_PORT}`);
     console.log(`API JSON:  http://localhost:${WEB_PORT}/api/respawns`);
     console.log(`Clients:   http://localhost:${WEB_PORT}/api/clients`);

@@ -1,10 +1,83 @@
-import net from "net";
+/**
+ * TeamSpeak connection layer.
+ *
+ * Supports two modes:
+ * - ClientQuery (local, port 25639): connects to local TS3 desktop client
+ * - ServerQuery (remote, port 10011): connects directly to TS server
+ *
+ * A global semaphore ensures only ONE connection at a time to avoid
+ * hitting the TS max connections limit (error 515).
+ */
 
-const CLIENTQUERY_PORT = 25639;
-const CLIENTQUERY_HOST = "127.0.0.1";
+import net from "net";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+// --- Configuration ---
+
+type TSMode = "clientquery" | "serverquery";
+
+function getMode(): TSMode {
+  const mode = (process.env.TS_MODE || "clientquery").toLowerCase();
+  if (mode === "serverquery" || mode === "sq") return "serverquery";
+  return "clientquery";
+}
+
+function getHost(): string {
+  return process.env.TS_HOST || "127.0.0.1";
+}
+
+function getPort(): number {
+  const mode = getMode();
+  if (mode === "serverquery") return parseInt(process.env.TS_QUERY_PORT || "10011");
+  return parseInt(process.env.TS_QUERY_PORT || "25639");
+}
+
+function getAuthCommands(): string[] {
+  const mode = getMode();
+  if (mode === "serverquery") {
+    const user = process.env.TS_QUERY_USER || "serveradmin";
+    const pass = process.env.TS_QUERY_PASS || "";
+    const sid = process.env.TS_VIRTUAL_SERVER || "1";
+    return [
+      `login ${user} ${pass}`,
+      `use sid=${sid}`,
+    ];
+  }
+  // ClientQuery
+  const apiKey = process.env.TS_APIKEY || "";
+  return [`auth apikey=${apiKey}`];
+}
+
+// --- Global connection semaphore (max 1 concurrent connection) ---
+
+let semaphoreQueue: Array<() => void> = [];
+let semaphoreLocked = false;
+
+function acquireSemaphore(): Promise<void> {
+  if (!semaphoreLocked) {
+    semaphoreLocked = true;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    semaphoreQueue.push(resolve);
+  });
+}
+
+function releaseSemaphore(): void {
+  if (semaphoreQueue.length > 0) {
+    const next = semaphoreQueue.shift()!;
+    next();
+  } else {
+    semaphoreLocked = false;
+  }
+}
+
+// --- Interfaces ---
 
 export interface ClientQueryOptions {
-  apiKey: string;
+  apiKey?: string; // kept for backward compat, but auth comes from env
   timeout?: number;
 }
 
@@ -15,28 +88,39 @@ export interface TSClient {
   clientType: number; // 0 = normal, 1 = serverquery
 }
 
+// --- Core: run commands ---
+
 /**
- * Connects to TS3 ClientQuery, authenticates, runs commands, and returns raw output.
- * Uses "error id=" response markers to know when each command finishes before sending the next.
- * Always ensures the socket is destroyed after use to avoid leaking connections.
+ * Connects to TS (ClientQuery or ServerQuery), authenticates, runs commands, returns raw output.
+ * Uses a global semaphore so only ONE connection exists at a time.
  */
-export function runCommands(
+export async function runCommands(
   commands: string[],
-  opts: ClientQueryOptions
+  opts?: ClientQueryOptions
 ): Promise<string> {
+  await acquireSemaphore();
+
+  try {
+    return await _runCommandsInternal(commands, opts?.timeout || 10000);
+  } finally {
+    releaseSemaphore();
+  }
+}
+
+function _runCommandsInternal(commands: string[], timeout: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const client = new net.Socket();
-    const timeout = opts.timeout || 10000;
     client.setTimeout(timeout);
     let settled = false;
 
     let fullData = "";
     let ready = false;
     let cmdIdx = 0;
-    // Count how many "error id=" responses we've seen (one per command)
     let errorResponseCount = 0;
 
-    const allCmds = [`auth apikey=${opts.apiKey}`, ...commands, "quit"];
+    const mode = getMode();
+    const authCmds = getAuthCommands();
+    const allCmds = [...authCmds, ...commands, "quit"];
 
     function done(err?: Error) {
       if (settled) return;
@@ -62,41 +146,55 @@ export function runCommands(
       return count;
     }
 
-    client.connect(CLIENTQUERY_PORT, CLIENTQUERY_HOST, () => {});
+    const host = getHost();
+    const port = getPort();
+
+    client.connect(port, host, () => {});
 
     client.on("data", (chunk) => {
       fullData += chunk.toString();
 
-      // Detect max clients limit reached - fail fast
+      // Detect max clients limit
       if (fullData.includes("id=515") || fullData.includes("max\\sclients\\sprotocol\\slimit")) {
-        done(new Error("ClientQuery max connections limit reached (id=515). Restart TS client or wait."));
+        done(new Error("TS max connections limit reached (id=515). Restart TS client or wait."));
         return;
       }
 
-      // Wait for the welcome message with "selected" before sending first command
-      if (!ready && fullData.includes("selected")) {
-        ready = true;
-        trySendNext(); // send auth
+      // Detect auth failures
+      if (fullData.includes("id=520") || fullData.includes("id=256")) {
+        done(new Error("TS authentication failed. Check credentials."));
         return;
       }
 
-      if (!ready) return;
+      // Wait for welcome message before sending first command
+      // ClientQuery: "selected schandlerid=1"
+      // ServerQuery: "Welcome to the TeamSpeak 3 ServerQuery interface"
+      if (!ready) {
+        const isReady = mode === "serverquery"
+          ? fullData.includes("ServerQuery") || fullData.includes("TS3")
+          : fullData.includes("selected");
+        if (isReady) {
+          ready = true;
+          trySendNext();
+        }
+        return;
+      }
 
       // Count "error id=" markers to know when each command response is complete
-      // TS sends "error id=N msg=..." after every command response
       const newCount = countErrors(fullData);
       while (errorResponseCount < newCount) {
         errorResponseCount++;
-        // Each error response means a command finished — send the next one
         trySendNext();
       }
     });
 
     client.on("close", () => done());
     client.on("error", (err) => done(err));
-    client.on("timeout", () => done(new Error("ClientQuery timeout")));
+    client.on("timeout", () => done(new Error("TS connection timeout")));
   });
 }
+
+// --- Helpers ---
 
 /**
  * Decode TeamSpeak escape sequences
@@ -110,40 +208,48 @@ export function decodeTSString(str: string): string {
     .replace(/\\\//g, "/");
 }
 
+export function encodeTSString(str: string): string {
+  return str
+    .replace(/ /g, "\\s")
+    .replace(/\|/g, "\\p")
+    .replace(/\//g, "\\/");
+}
+
 /**
  * Get the description of a specific channel.
- * Retries once on failure (TS can return empty responses after connection pressure).
+ * Uses `channelinfo` for ServerQuery, `channelvariable` for ClientQuery.
  */
 export async function getChannelDescription(
   cid: number,
-  apiKey: string
+  apiKey?: string
 ): Promise<string> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const raw = await runCommands(
-      [`channelvariable cid=${cid} channel_description`],
-      { apiKey }
-    );
+  const mode = getMode();
+  // ServerQuery uses channelinfo, ClientQuery uses channelvariable
+  const cmd = mode === "serverquery"
+    ? `channelinfo cid=${cid}`
+    : `channelvariable cid=${cid} channel_description`;
 
-    // Find the line containing channel_description=
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const raw = await runCommands([cmd]);
+
     const lines = raw.split("\n");
     for (const line of lines) {
       const idx = line.indexOf("channel_description=");
       if (idx >= 0) {
         const value = line.substring(idx + "channel_description=".length).trim();
-        return decodeTSString(value);
+        // For ServerQuery, the value may continue until the next key (space-separated)
+        // but channel_description is usually the last or only key with long content
+        return decodeTSString(value.split(/\s+channel_\w+=/)[0] || value);
       }
     }
 
-    // Check if channel_description exists but without value (empty description)
-    const rawLines = raw.split("\n");
-    for (const line of rawLines) {
-      // "cid=160 channel_description" (no = sign means empty)
+    // Check empty description (ClientQuery returns key without =)
+    for (const line of lines) {
       if (line.includes("channel_description") && !line.includes("channel_description=")) {
-        return ""; // empty description
+        return "";
       }
     }
 
-    // First attempt failed - wait a bit and retry
     if (attempt === 0) {
       await new Promise((r) => setTimeout(r, 1000));
     }
@@ -155,13 +261,10 @@ export async function getChannelDescription(
  * Get the channel list
  */
 export async function getChannelList(
-  apiKey: string
+  apiKey?: string
 ): Promise<Array<{ cid: number; name: string; clients: number }>> {
-  const raw = await runCommands(["channellist"], { apiKey });
+  const raw = await runCommands(["channellist"]);
 
-  // The channellist response is between the auth "error id=0" and the next "error id="
-  // Format: cid=1 ... channel_name=...|cid=2 ...\nerror id=0 msg=ok
-  // Find the line(s) containing "cid=" entries (they are pipe-separated on one line)
   const lines = raw.split("\n");
   let channelLine = "";
   for (const line of lines) {
@@ -176,8 +279,7 @@ export async function getChannelList(
   const entries = channelLine.split("|");
   return entries.map((entry) => {
     const cidMatch = entry.match(/cid=(\d+)/);
-    // channel_name value goes until the next known key or end of entry
-    const nameMatch = entry.match(/channel_name=(.+?)(?:\s+channel_flag|\s+total_clients|\s*$)/);
+    const nameMatch = entry.match(/channel_name=(.+?)(?:\s+channel_flag|\s+total_clients|\s+channel_|\s*$)/);
     const clientsMatch = entry.match(/total_clients=(\d+)/);
 
     return {
@@ -189,12 +291,12 @@ export async function getChannelList(
 }
 
 /**
- * Find the Respawn List channel (the one whose name contains "Respawn List")
+ * Find the Respawn List channel
  */
 export async function findRespawnListChannel(
-  apiKey: string
+  apiKey?: string
 ): Promise<{ cid: number; name: string; count: number } | null> {
-  const channels = await getChannelList(apiKey);
+  const channels = await getChannelList();
   const respawnCh = channels.find(
     (ch) =>
       ch.name.includes("Respawn List") &&
@@ -212,12 +314,12 @@ export async function findRespawnListChannel(
 }
 
 /**
- * Find the Respawn Number channel (catalog of all respawns)
+ * Find the Respawn Number channel (catalog)
  */
 export async function findRespawnNumberChannel(
-  apiKey: string
+  apiKey?: string
 ): Promise<{ cid: number; name: string; count: number } | null> {
-  const channels = await getChannelList(apiKey);
+  const channels = await getChannelList();
   const ch = channels.find((c) => c.name.includes("Respawn Number"));
 
   if (!ch) return null;
@@ -231,14 +333,12 @@ export async function findRespawnNumberChannel(
 }
 
 /**
- * Get all connected clients from TeamSpeak via ClientQuery.
+ * Get all connected clients.
  * Filters out serverquery bots (client_type=1).
  */
-export async function getAllClients(apiKey: string): Promise<TSClient[]> {
-  const raw = await runCommands(["clientlist"], { apiKey });
+export async function getAllClients(apiKey?: string): Promise<TSClient[]> {
+  const raw = await runCommands(["clientlist"]);
 
-  // The clientlist response is pipe-separated entries on one line:
-  // clid=1 cid=5 client_database_id=2 client_nickname=PlayerName client_type=0|clid=2 ...
   const lines = raw.split("\n");
   let clientLine = "";
   for (const line of lines) {
@@ -260,12 +360,9 @@ export async function getAllClients(apiKey: string): Promise<TSClient[]> {
     const typeMatch = entry.match(/client_type=(\d+)/);
 
     const clientType = parseInt(typeMatch?.[1] || "0");
-
-    // Skip serverquery bots
     if (clientType === 1) continue;
 
     const nickname = decodeTSString(nicknameMatch?.[1]?.trim() || "");
-    // Skip clients with empty/invalid nicknames
     if (!nickname || nickname === "Unknown" || nickname === "undefined") continue;
 
     clients.push({
@@ -277,4 +374,44 @@ export async function getAllClients(apiKey: string): Promise<TSClient[]> {
   }
 
   return clients;
+}
+
+/**
+ * Send a text message to a specific client (private message).
+ * Used for bot communication.
+ */
+export async function sendTextMessage(
+  targetClid: number,
+  message: string
+): Promise<string> {
+  const escapedMsg = encodeTSString(message);
+  return runCommands([
+    "clientnotifyregister schandlerid=1 event=notifytextmessage",
+    `sendtextmessage targetmode=1 target=${targetClid} msg=${escapedMsg}`,
+  ]);
+}
+
+/**
+ * Find a client by UID (for bot lookup).
+ */
+export async function findClientByUid(uid: string): Promise<number | null> {
+  const escapedUid = uid.replace(/\//g, "\\/");
+  try {
+    const raw = await runCommands([`clientgetids cluid=${escapedUid}`]);
+    const lines = raw.split("\n");
+    for (const line of lines) {
+      if (line.includes("cluid=") && line.includes("clid=")) {
+        const clidMatch = line.match(/clid=(\d+)/);
+        if (clidMatch) return parseInt(clidMatch[1]);
+      }
+    }
+  } catch { /* bot not found */ }
+  return null;
+}
+
+/**
+ * Get connection info (for logging/debugging)
+ */
+export function getTSConnectionInfo(): { mode: TSMode; host: string; port: number } {
+  return { mode: getMode(), host: getHost(), port: getPort() };
 }
