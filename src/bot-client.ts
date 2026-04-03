@@ -19,6 +19,8 @@ import {
   decodeTSString,
   encodeTSString,
   getTSConnectionInfo,
+  acquireSemaphore,
+  releaseSemaphore,
 } from "./clientquery";
 
 dotenv.config();
@@ -159,9 +161,13 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
  * 1. Register for events
  * 2. Send a message
  * 3. Wait for async event notifications (not regular command responses)
+ *
+ * Uses the global semaphore to ensure only ONE TS connection at a time.
  */
 async function sendRespInfoAndCollect(clid: number, code: string): Promise<string[] | null> {
   const info = getTSConnectionInfo();
+
+  await acquireSemaphore();
 
   return new Promise((resolve) => {
     const client = new net.Socket();
@@ -191,6 +197,7 @@ async function sendRespInfoAndCollect(clid: number, code: string): Promise<strin
       settled = true;
       if (waitTimer) clearTimeout(waitTimer);
       client.destroy();
+      releaseSemaphore();
       resolve(result);
     }
 
