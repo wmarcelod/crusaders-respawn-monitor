@@ -1,0 +1,20 @@
+{
+  "_comment": "Mapeamento de nomes informais da planilha para nomes do catalogo. Edite quando a planilha mudar.",
+  "aliases": {
+    "gt": "gold token",
+    "carrinho": "gnomprona",
+    "caminho ferumbras": "ferumbras path",
+    "caminho do ferumbras": "ferumbras path",
+    "livraria": "library",
+    "plague seal": "ferumbras plague",
+    "rotten golem": "rotten",
+    "norc": "norcferatu",
+    "upper rosha": "upper roshamuul",
+    "west rosha": "roshamuul west",
+    "west roshamuul": "roshamuul west"
+  },
+  "directMappings": {
+    "Rotten Golem Norte D+Sul E": "41d",
+    "GT FUNDO - 37C": "37c"
+  }
+}
