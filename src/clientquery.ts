@@ -10,6 +10,7 @@
  */
 
 import net from "net";
+import fs from "fs";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -45,8 +46,12 @@ function getAuthCommands(): string[] {
       `use sid=${sid}`,
     ];
   }
-  // ClientQuery
-  const apiKey = process.env.TS_APIKEY || "";
+  // ClientQuery - try shared volume key first, then env var
+  let apiKey = process.env.TS_APIKEY || "";
+  try {
+    const sharedKey = fs.readFileSync("/shared/cq_apikey.txt", "utf-8").trim();
+    if (sharedKey) apiKey = sharedKey;
+  } catch { /* shared volume not available */ }
   return [`auth apikey=${apiKey}`];
 }
 
