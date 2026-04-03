@@ -55,7 +55,7 @@ function getAuthCommands(): string[] {
 let semaphoreQueue: Array<() => void> = [];
 let semaphoreLocked = false;
 
-function acquireSemaphore(): Promise<void> {
+export function acquireSemaphore(): Promise<void> {
   if (!semaphoreLocked) {
     semaphoreLocked = true;
     return Promise.resolve();
@@ -65,7 +65,7 @@ function acquireSemaphore(): Promise<void> {
   });
 }
 
-function releaseSemaphore(): void {
+export function releaseSemaphore(): void {
   if (semaphoreQueue.length > 0) {
     const next = semaphoreQueue.shift()!;
     next();
