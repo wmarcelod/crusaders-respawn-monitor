@@ -6,6 +6,9 @@ import com.github.manevolent.ts3j.identity.LocalIdentity;
 import com.github.manevolent.ts3j.event.*;
 import com.github.manevolent.ts3j.api.Channel;
 import com.github.manevolent.ts3j.api.Client;
+import com.github.manevolent.ts3j.command.SingleCommand;
+import com.github.manevolent.ts3j.command.parameter.CommandSingleParameter;
+import com.github.manevolent.ts3j.protocol.ProtocolRole;
 import com.google.gson.Gson;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpExchange;
@@ -220,6 +223,39 @@ public class TS3Bridge {
         } finally {
             fetchingDescriptions = false;
         }
+    }
+
+    /**
+     * Resolve a UID to a clid using the TS3 'clientgetids' command.
+     * Unlike listClients(), this works for ALL client types including ServerQuery bots
+     * that don't appear in the regular client list.
+     * Returns -1 if not found.
+     */
+    private static int resolveUidToClid(String uid) {
+        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return -1;
+        try {
+            synchronized (commandLock) {
+                SingleCommand command = new SingleCommand(
+                    "clientgetids",
+                    ProtocolRole.CLIENT,
+                    new CommandSingleParameter("cluid", uid)
+                );
+                Iterable<SingleCommand> results = tsClient.executeCommand(command).get();
+                Iterator<SingleCommand> it = results.iterator();
+                if (it.hasNext()) {
+                    Map<String, String> map = it.next().toMap();
+                    String clidStr = map.get("clid");
+                    if (clidStr != null) {
+                        int clid = Integer.parseInt(clidStr);
+                        log("[Bridge] resolveUidToClid: " + uid + " -> clid=" + clid);
+                        return clid;
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            log("[Bridge] resolveUidToClid failed for " + uid + ": " + ex.getMessage());
+        }
+        return -1;
     }
 
     /**
@@ -652,7 +688,19 @@ public class TS3Bridge {
         }
         String uid = java.net.URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
 
-        // Try live listClients() first
+        // Try clientgetids first (works for ALL client types, including invisible bots)
+        int resolvedClid = resolveUidToClid(uid);
+        if (resolvedClid > 0) {
+            sendJson(ex, 200, jsonObj(
+                "clid", resolvedClid,
+                "cid", 0,
+                "nickname", "resolved-by-uid",
+                "client_type", 0
+            ));
+            return;
+        }
+
+        // Try live listClients() as fallback
         try {
             for (Client cl : tsClient.listClients()) {
                 String clientUid = cl.getUniqueIdentifier();
@@ -697,6 +745,7 @@ public class TS3Bridge {
     /**
      * POST /api/message - Send a private message to a client.
      * Body: {"target_clid": 123, "message": "hello"}
+     *   OR: {"target_uid": "base64uid=", "message": "hello"}  (resolves UID -> clid via clientgetids)
      */
     @SuppressWarnings("unchecked")
     private static void handleMessage(HttpExchange ex) throws IOException {
@@ -724,10 +773,23 @@ public class TS3Bridge {
         int targetClid;
         String message;
         try {
-            targetClid = ((Number) req.get("target_clid")).intValue();
             message = (String) req.get("message");
+            if (message == null || message.isEmpty()) throw new IllegalArgumentException("Missing message");
+
+            // Support target_uid as alternative to target_clid (resolves UID -> clid internally)
+            if (req.containsKey("target_uid")) {
+                String targetUid = (String) req.get("target_uid");
+                targetClid = resolveUidToClid(targetUid);
+                if (targetClid <= 0) {
+                    sendJson(ex, 404, jsonObj("success", false, "error", "Could not resolve UID to clid: " + targetUid));
+                    return;
+                }
+                log("[Bridge] Resolved target_uid=" + targetUid + " -> clid=" + targetClid);
+            } else {
+                targetClid = ((Number) req.get("target_clid")).intValue();
+            }
         } catch (Exception e) {
-            sendJson(ex, 400, jsonObj("success", false, "error", "Missing target_clid or message"));
+            sendJson(ex, 400, jsonObj("success", false, "error", "Missing target_clid/target_uid or message: " + e.getMessage()));
             return;
         }
 

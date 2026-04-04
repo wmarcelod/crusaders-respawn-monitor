@@ -156,12 +156,15 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
 
 /**
  * Send !respinfo via bridge HTTP API.
+ * Uses target_uid so the bridge resolves UID -> clid internally via clientgetids.
+ * This works even for bots that don't appear in listClients().
+ *
  * 1. Clear existing messages
- * 2. Send message to bot
+ * 2. Send message to bot (by UID)
  * 3. Wait for bot to respond
  * 4. Collect responses
  */
-async function sendRespInfoViaBridge(clid: number, code: string): Promise<string[] | null> {
+async function sendRespInfoViaBridge(code: string): Promise<string[] | null> {
   const http = await import("http");
   const bridgeUrl = process.env.BRIDGE_URL || "http://ts3bridge:8080";
 
@@ -192,8 +195,8 @@ async function sendRespInfoViaBridge(clid: number, code: string): Promise<string
     // 1. Clear any existing messages
     await bridgeReq("/api/messages");
 
-    // 2. Send !respinfo to bot
-    const sendBody = JSON.stringify({ target_clid: clid, message: `!respinfo ${code}` });
+    // 2. Send !respinfo to bot (by UID - bridge resolves to clid internally)
+    const sendBody = JSON.stringify({ target_uid: BOT_UID, message: `!respinfo ${code}` });
     const sendResult = await bridgeReq("/api/message", "POST", sendBody);
     const sendParsed = JSON.parse(sendResult);
     if (!sendParsed.success) return null;
@@ -243,9 +246,9 @@ async function sendRespInfoViaBridge(clid: number, code: string): Promise<string
 async function sendRespInfoAndCollect(clid: number, code: string): Promise<string[] | null> {
   const info = getTSConnectionInfo();
 
-  // Bridge mode: use HTTP API
+  // Bridge mode: use HTTP API (sends by UID, no clid needed)
   if (info.mode === "bridge") {
-    return sendRespInfoViaBridge(clid, code);
+    return sendRespInfoViaBridge(code);
   }
 
   await acquireSemaphore();
@@ -371,28 +374,36 @@ export async function queryRespInfo(
   code: string,
   currentRemainingMin?: number
 ): Promise<RespInfoResult | null> {
-  const lastKnown = readLastKnownClid();
+  const info = getTSConnectionInfo();
   let messages: string[] | null = null;
   let usedClid: number | null = null;
 
-  // Attempt 1: last known clid
-  if (lastKnown !== null) {
-    messages = await sendRespInfoAndCollect(lastKnown, code);
-    if (messages) usedClid = lastKnown;
-  }
+  // Bridge mode: send by UID directly (no clid lookup needed)
+  if (info.mode === "bridge") {
+    messages = await sendRespInfoViaBridge(code);
+    if (!messages) return null;
+  } else {
+    // Non-bridge mode: use clid lookup
+    const lastKnown = readLastKnownClid();
 
-  // Attempt 2: lookup by UID
-  if (!messages) {
-    const lookupClid = await getBotClidViaLookup();
-    if (lookupClid !== null && lookupClid !== lastKnown) {
-      messages = await sendRespInfoAndCollect(lookupClid, code);
-      if (messages) usedClid = lookupClid;
+    // Attempt 1: last known clid
+    if (lastKnown !== null) {
+      messages = await sendRespInfoAndCollect(lastKnown, code);
+      if (messages) usedClid = lastKnown;
     }
+
+    // Attempt 2: lookup by UID
+    if (!messages) {
+      const lookupClid = await getBotClidViaLookup();
+      if (lookupClid !== null && lookupClid !== lastKnown) {
+        messages = await sendRespInfoAndCollect(lookupClid, code);
+        if (messages) usedClid = lookupClid;
+      }
+    }
+
+    if (!messages || !usedClid) return null;
+    saveLastKnownClid(usedClid);
   }
-
-  if (!messages || !usedClid) return null;
-
-  saveLastKnownClid(usedClid);
 
   const parsed = parseRespInfoMessages(messages);
 
