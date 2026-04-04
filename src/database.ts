@@ -7,7 +7,6 @@
  * 3. History: track who occupied respawns, queue patterns, player stats
  */
 
-import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 
@@ -17,15 +16,27 @@ const DB_PATH = path.join(DB_DIR, "crusaders.db");
 // Ensure data directory exists
 fs.mkdirSync(DB_DIR, { recursive: true });
 
-const db = new Database(DB_PATH);
+// Try to load better-sqlite3 (native module, may fail in some envs)
+let db: any;
+let DB_AVAILABLE = false;
+try {
+  const Database = require("better-sqlite3");
+  db = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  DB_AVAILABLE = true;
+  console.log("[DB] SQLite database initialized at", DB_PATH);
+} catch (err: any) {
+  console.warn("[DB] better-sqlite3 not available:", err.message);
+  console.warn("[DB] Running without database - no persistent storage");
+  db = null;
+}
 
-// Enable WAL mode for better concurrent performance
-db.pragma("journal_mode = WAL");
-db.pragma("synchronous = NORMAL");
+export { DB_AVAILABLE };
 
 // --- Schema ---
 
-db.exec(`
+if (db) db.exec(`
   CREATE TABLE IF NOT EXISTS respawn_state (
     code TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -112,7 +123,7 @@ db.exec(`
 
 // --- Prepared statements ---
 
-const stmts = {
+const stmts = !db ? null : {
   // Respawn state
   upsertState: db.prepare(`
     INSERT INTO respawn_state (code, name, occupied_by, occupied_by_uid, elapsed_minutes, total_minutes, remaining_minutes, nexts, progress_percent, expected_exit, color, updated_at)
@@ -241,6 +252,12 @@ export interface RespawnStateRow {
   updated_at: string;
 }
 
+// Guard: all functions no-op when DB is unavailable
+function dbGuard(): boolean {
+  if (!db || !stmts) return false;
+  return true;
+}
+
 /** Save current respawn state (called on each data refresh) */
 export function saveRespawnState(entries: Array<{
   code: string;
@@ -255,16 +272,17 @@ export function saveRespawnState(entries: Array<{
   expectedExit: string;
   color: string;
 }>): void {
+  if (!dbGuard()) return;
   const tx = db.transaction(() => {
     // Get current codes in DB
     const existing = new Set(
-      (stmts.getAllState.all() as RespawnStateRow[]).map(r => r.code)
+      (stmts!.getAllState.all() as RespawnStateRow[]).map(r => r.code)
     );
     const currentCodes = new Set(entries.map(e => e.code));
 
     // Upsert active respawns
     for (const e of entries) {
-      stmts.upsertState.run({
+      stmts!.upsertState.run({
         code: e.code,
         name: e.name,
         occupiedBy: e.occupiedBy,
@@ -282,7 +300,7 @@ export function saveRespawnState(entries: Array<{
     // Remove respawns no longer occupied
     for (const code of existing) {
       if (!currentCodes.has(code)) {
-        stmts.deleteState.run(code);
+        stmts!.deleteState.run(code);
       }
     }
   });
@@ -291,7 +309,8 @@ export function saveRespawnState(entries: Array<{
 
 /** Get last known respawn state from DB (fallback when bridge is down) */
 export function getLastKnownState(): RespawnStateRow[] {
-  return stmts.getAllState.all() as RespawnStateRow[];
+  if (!dbGuard()) return [];
+  return stmts!.getAllState.all() as RespawnStateRow[];
 }
 
 /** Save queue/respinfo data from bot */
@@ -304,7 +323,8 @@ export function saveQueueInfo(code: string, data: {
   totalQueueMinutes: number;
   freeAt: string;
 }): void {
-  stmts.upsertQueue.run({
+  if (!dbGuard()) return;
+  stmts!.upsertQueue.run({
     code,
     currentPlayer: data.currentPlayer,
     currentPlayerUid: data.currentPlayerUid,
@@ -317,7 +337,7 @@ export function saveQueueInfo(code: string, data: {
 
   // Also save queue entries to history
   for (const n of data.nexts) {
-    stmts.insertQueueEntry.run({
+    stmts!.insertQueueEntry.run({
       code,
       position: n.position,
       playerName: n.player,
@@ -329,7 +349,8 @@ export function saveQueueInfo(code: string, data: {
 
 /** Get cached queue data from DB */
 export function getCachedQueueFromDB(code: string): any | null {
-  const row = stmts.getQueue.get(code) as any;
+  if (!dbGuard()) return null;
+  const row = stmts!.getQueue.get(code) as any;
   if (!row) return null;
   return {
     code,
@@ -346,7 +367,8 @@ export function getCachedQueueFromDB(code: string): any | null {
 
 /** Get all cached queue data */
 export function getAllCachedQueues(): Map<string, any> {
-  const rows = stmts.getAllQueues.all() as any[];
+  if (!dbGuard()) return new Map();
+  const rows = stmts!.getAllQueues.all() as any[];
   const map = new Map();
   for (const row of rows) {
     map.set(row.code, {
@@ -377,13 +399,14 @@ export function updateHistory(entries: Array<{
   elapsedMinutes: number;
   nexts: number;
 }>): void {
+  if (!dbGuard()) return;
   const currentCodes = new Set(entries.map(e => e.code));
 
   // Check for ended occupations
   for (const [code, info] of activeOccupants) {
     if (!currentCodes.has(code)) {
       // Respawn freed - end the history entry
-      stmts.endHistory.run({
+      stmts!.endHistory.run({
         id: info.id,
         durationMinutes: 0, // Will be calculated from timestamps
         nextsPeak: info.nextsPeak,
@@ -398,7 +421,7 @@ export function updateHistory(entries: Array<{
     if (!current) {
       // New occupation or first time seeing this respawn
       // Check DB for existing active entry
-      const dbActive = stmts.getActiveOccupant.get(e.code) as any;
+      const dbActive = stmts!.getActiveOccupant.get(e.code) as any;
       if (dbActive && dbActive.occupied_by === e.occupiedBy) {
         // Resume tracking from DB
         activeOccupants.set(e.code, {
@@ -409,10 +432,10 @@ export function updateHistory(entries: Array<{
       } else {
         // New occupant - close old entry if exists
         if (dbActive) {
-          stmts.endHistory.run({ id: dbActive.id, durationMinutes: e.elapsedMinutes, nextsPeak: dbActive.nexts_peak || 0 });
+          stmts!.endHistory.run({ id: dbActive.id, durationMinutes: e.elapsedMinutes, nextsPeak: dbActive.nexts_peak || 0 });
         }
         // Insert new
-        const result = stmts.insertHistory.run({
+        const result = stmts!.insertHistory.run({
           code: e.code,
           name: e.name,
           occupiedBy: e.occupiedBy,
@@ -426,17 +449,17 @@ export function updateHistory(entries: Array<{
       }
     } else if (current.player !== e.occupiedBy) {
       // Player changed! End old, start new
-      stmts.endHistory.run({ id: current.id, durationMinutes: e.elapsedMinutes, nextsPeak: current.nextsPeak });
+      stmts!.endHistory.run({ id: current.id, durationMinutes: e.elapsedMinutes, nextsPeak: current.nextsPeak });
 
       // Update player stats for the old occupant
-      stmts.upsertPlayerStat.run({
+      stmts!.upsertPlayerStat.run({
         playerName: current.player,
         respawnCode: e.code,
         respawnName: e.name,
         minutes: e.elapsedMinutes,
       });
 
-      const result = stmts.insertHistory.run({
+      const result = stmts!.insertHistory.run({
         code: e.code,
         name: e.name,
         occupiedBy: e.occupiedBy,
@@ -456,27 +479,32 @@ export function updateHistory(entries: Array<{
 
 /** Get respawn history */
 export function getRespawnHistory(code: string): any[] {
-  return stmts.getHistoryForCode.all(code) as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getHistoryForCode.all(code) as any[];
 }
 
 /** Get player history */
 export function getPlayerHistory(playerName: string): any[] {
-  return stmts.getHistoryForPlayer.all(playerName) as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getHistoryForPlayer.all(playerName) as any[];
 }
 
 /** Get player stats (favorite respawns, time spent, etc.) */
 export function getPlayerStatsFromDB(playerName: string): any[] {
-  return stmts.getPlayerStats.all(playerName) as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getPlayerStats.all(playerName) as any[];
 }
 
 /** Get top players by visits */
 export function getTopPlayers(): any[] {
-  return stmts.getTopPlayers.all() as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getTopPlayers.all() as any[];
 }
 
 /** Get recent respawn changes */
 export function getRecentChanges(): any[] {
-  return stmts.getRecentHistory.all() as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getRecentHistory.all() as any[];
 }
 
 /** Save a chat message */
@@ -491,7 +519,8 @@ export function saveChatMessage(msg: {
   isBot?: boolean;
   isCommand?: boolean;
 }): void {
-  stmts.insertChatMessage.run({
+  if (!dbGuard()) return;
+  stmts!.insertChatMessage.run({
     fromClid: msg.fromClid,
     fromName: msg.fromName,
     fromUid: msg.fromUid || "",
@@ -516,9 +545,21 @@ export function saveChatMessages(msgs: Array<{
   isBot?: boolean;
   isCommand?: boolean;
 }>): void {
+  if (!dbGuard()) return;
   const tx = db.transaction(() => {
     for (const msg of msgs) {
-      saveChatMessage(msg);
+      // Call stmts directly here since we already checked guard
+      stmts!.insertChatMessage.run({
+        fromClid: msg.fromClid,
+        fromName: msg.fromName,
+        fromUid: msg.fromUid || "",
+        message: msg.message,
+        targetMode: msg.targetMode || "channel",
+        channelName: msg.channelName || "",
+        timestamp: msg.timestamp || new Date().toISOString().replace("T", " ").substring(0, 19),
+        isBot: msg.isBot ? 1 : 0,
+        isCommand: msg.isCommand ? 1 : 0,
+      });
     }
   });
   tx();
@@ -526,31 +567,37 @@ export function saveChatMessages(msgs: Array<{
 
 /** Get recent chat messages */
 export function getChatMessages(limit: number = 100): any[] {
-  return stmts.getChatMessages.all(limit) as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getChatMessages.all(limit) as any[];
 }
 
 /** Get chat messages by date range */
 export function getChatMessagesByDate(from: string, to: string): any[] {
-  return stmts.getChatMessagesByDate.all({ from, to }) as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getChatMessagesByDate.all({ from, to }) as any[];
 }
 
 /** Get respawn history for a date range */
 export function getHistoryByDateRange(from: string, to: string): any[] {
-  return stmts.getHistoryByDateRange.all({ from, to }) as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getHistoryByDateRange.all({ from, to }) as any[];
 }
 
 /** Get chat messages by player */
 export function getChatMessagesByPlayer(name: string): any[] {
-  return stmts.getChatMessagesByPlayer.all(name) as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getChatMessagesByPlayer.all(name) as any[];
 }
 
 /** Get chat statistics (top chatters) */
 export function getChatStats(): any[] {
-  return stmts.getChatStats.all() as any[];
+  if (!dbGuard()) return [];
+  return stmts!.getChatStats.all() as any[];
 }
 
 /** Get DB stats */
 export function getDBStats(): { respawns: number; queueEntries: number; historyEntries: number; players: number; chatMessages: number } {
+  if (!dbGuard()) return { respawns: 0, queueEntries: 0, historyEntries: 0, players: 0, chatMessages: 0 };
   const respawns = (db.prepare("SELECT COUNT(*) as c FROM respawn_state").get() as any).c;
   const queueEntries = (db.prepare("SELECT COUNT(*) as c FROM queue_cache").get() as any).c;
   const historyEntries = (db.prepare("SELECT COUNT(*) as c FROM respawn_history").get() as any).c;
