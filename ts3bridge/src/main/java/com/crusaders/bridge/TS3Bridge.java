@@ -60,6 +60,7 @@ public class TS3Bridge {
     private static int serverPort;
     private static String nickname;
     private static int httpPort;
+    private static String identityUid = "unknown";
     private static final Path DATA_DIR = Paths.get("data");
     private static final Path IDENTITY_FILE = DATA_DIR.resolve("identity.ini");
     private static final int IDENTITY_LEVEL = 10;
@@ -87,6 +88,9 @@ public class TS3Bridge {
 
         // Load or create TS3 identity
         LocalIdentity identity = loadIdentity();
+        identityUid = identity.getUid().toString();
+        System.out.println("  UID:       " + identityUid);
+        System.out.println("============================================");
 
         // Connect (blocks forever with reconnection)
         connectWithRetry(identity);
@@ -100,12 +104,32 @@ public class TS3Bridge {
     // ========== IDENTITY ==========
 
     private static LocalIdentity loadIdentity() throws IOException, GeneralSecurityException {
+        // Priority 1: TS_IDENTITY env var (base64-encoded identity INI file content)
+        String tsIdentityB64 = System.getenv("TS_IDENTITY");
+        if (tsIdentityB64 != null && !tsIdentityB64.isEmpty()) {
+            try {
+                byte[] iniBytes = Base64.getDecoder().decode(tsIdentityB64);
+                try (InputStream in = new ByteArrayInputStream(iniBytes)) {
+                    LocalIdentity identity = LocalIdentity.read(in);
+                    log("[Bridge] Loaded identity from TS_IDENTITY env (level " + identity.getSecurityLevel() + ", UID=" + identity.getUid() + ")");
+                    // Also save to file so it persists across restarts
+                    saveIdentity(identity);
+                    return identity;
+                }
+            } catch (Exception e) {
+                log("[Bridge] WARNING: Failed to parse TS_IDENTITY env var: " + e.getMessage());
+                log("[Bridge] TS_IDENTITY must be base64-encoded content of a TS3 identity INI file");
+                log("[Bridge] Falling back to file/generated identity...");
+            }
+        }
+
+        // Priority 2: Saved identity file
         if (Files.exists(IDENTITY_FILE)) {
             try (InputStream in = Files.newInputStream(IDENTITY_FILE)) {
                 LocalIdentity identity = LocalIdentity.read(in);
-                System.out.println("[Bridge] Loaded identity (level " + identity.getSecurityLevel() + ")");
+                log("[Bridge] Loaded identity from file (level " + identity.getSecurityLevel() + ", UID=" + identity.getUid() + ")");
                 if (identity.getSecurityLevel() < IDENTITY_LEVEL) {
-                    System.out.println("[Bridge] Improving security level to " + IDENTITY_LEVEL + "...");
+                    log("[Bridge] Improving security level to " + IDENTITY_LEVEL + "...");
                     identity.improveSecurity(IDENTITY_LEVEL);
                     saveIdentity(identity);
                 }
@@ -113,10 +137,11 @@ public class TS3Bridge {
             }
         }
 
-        System.out.println("[Bridge] Generating new identity (security level " + IDENTITY_LEVEL + ")...");
+        // Priority 3: Generate new identity
+        log("[Bridge] Generating new identity (security level " + IDENTITY_LEVEL + ")...");
         LocalIdentity identity = LocalIdentity.generateNew(IDENTITY_LEVEL);
         saveIdentity(identity);
-        System.out.println("[Bridge] Identity ready");
+        log("[Bridge] Identity ready (UID=" + identity.getUid() + ")");
         return identity;
     }
 
@@ -469,6 +494,7 @@ public class TS3Bridge {
         status.put("connected", connected);
         status.put("server", serverAddr + ":" + serverPort);
         status.put("nickname", nickname);
+        status.put("uid", identityUid);
         status.put("channels", channelCache.size());
         status.put("clients", clientCache.size());
 
