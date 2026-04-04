@@ -306,18 +306,18 @@ function renderHTML(
           + `</div>`;
       }
 
-      // Fila column: show inline bot data if available
+      // Get bot data for "Livre as" column
+      const botData = getCachedRespInfo(e.code);
+      const freeAt = (e.nexts > 0 && botData && botData.freeAt) ? botData.freeAt : e.expectedExit;
+
+      // Fila column
       let filaHtml = "-";
       if (e.nexts > 0) {
-        const botData = getCachedRespInfo(e.code);
         filaHtml = `<span class="has-next clickable" onclick="showQueueInfo('${escapeHtml(e.code)}', '${escapeHtml(e.name)}')">+${e.nexts} 🔍</span>`;
-        if (botData && botData.freeAt) {
-          filaHtml += `<div class="queue-inline">livre ~${botData.freeAt}</div>`;
-        }
       }
 
       return `
-      <tr class="${rowClass}" data-code="${escapeHtml(e.code)}" data-respawn="${escapeHtml(e.name)}" data-player="${escapeHtml(e.occupiedBy)}" data-voc="${vocClass}" data-level="${level}" data-remaining="${e.remainingMinutes}" data-exit="${e.expectedExit}">
+      <tr class="${rowClass}" data-code="${escapeHtml(e.code)}" data-respawn="${escapeHtml(e.name)}" data-player="${escapeHtml(e.occupiedBy)}" data-voc="${vocClass}" data-level="${level}" data-remaining="${e.remainingMinutes}" data-exit="${freeAt}">
         <td class="code"><a href="/respawn/${encodeURIComponent(e.code)}" class="respawn-link">${escapeHtml(e.code)}</a></td>
         <td class="respawn-name"><a href="/respawn/${encodeURIComponent(e.code)}" class="respawn-link">${escapeHtml(e.name)}</a></td>
         <td class="player-cell">${playerHtml}</td>
@@ -335,7 +335,7 @@ function renderHTML(
           ${e.isEntryWindow ? "TROCANDO" : timeUp ? `SAINDO (+${e.elapsedMinutes - e.totalMinutes}min)` : e.remainingFormatted}
         </td>
         <td class="exit-time ${timeUp ? "entry-window-text" : e.isAlmostDone ? "almost-text" : ""}">
-          ${e.expectedExit}
+          ${freeAt}${e.nexts > 0 && botData?.freeAt ? ' <span class="queue-indicator">+fila</span>' : ''}
         </td>
         <td class="nexts">${filaHtml}</td>
         <td class="status">${statusBadge(e)}</td>
@@ -850,11 +850,115 @@ function renderHTML(
       margin-top: 4px;
     }
 
+    .queue-indicator { font-size: 0.65em; color: #818cf8; font-weight: 400; }
+
+    .theme-toggle-btn {
+      background: #111322;
+      border: 1px solid #2e3150;
+      padding: 8px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 1em;
+      line-height: 1;
+      transition: all 0.2s;
+    }
+    .theme-toggle-btn:hover { background: #1e2030; border-color: #818cf8; }
+
     @media (max-width: 900px) {
       .stats-row { grid-template-columns: repeat(3, 1fr); }
       .container { padding: 12px; }
       tbody td { padding: 6px 8px; font-size: 0.78em; }
     }
+
+    /* ========= Light Theme ========= */
+    body.light { background: #f5f7fa; color: #374151; }
+    body.light header { border-color: #e5e7eb; }
+    body.light h1 { color: #111827; }
+    body.light h1 span { color: #6366f1; }
+    body.light .meta { color: #9ca3af; }
+    body.light .stat-card { background: #fff; border-color: #e5e7eb; }
+    body.light .stat-card .label { color: #9ca3af; }
+    body.light .stat-card.total .value { color: #6366f1; }
+    body.light .stat-card.active .value { color: #059669; }
+    body.light .stat-card.almost .value { color: #d97706; }
+    body.light .stat-card.switching .value { color: #7c3aed; }
+    body.light .stat-card.free .value { color: #2563eb; }
+    body.light .stat-card.reserved .value { color: #9333ea; }
+    body.light .section-title { color: #6b7280; }
+    body.light .section-title .count { background: #e5e7eb; color: #6366f1; }
+    body.light table { background: #fff; border-color: #e5e7eb; }
+    body.light thead th { background: #f9fafb; color: #6b7280; border-color: #e5e7eb; }
+    body.light tbody td { border-color: #f3f4f6; }
+    body.light tbody tr:hover { background: #f9fafb; }
+    body.light .code { color: #6366f1; }
+    body.light .respawn-name { color: #111827; }
+    body.light .respawn-link:hover { color: #6366f1; }
+    body.light .player-name { color: #7c3aed; }
+    body.light .player-link:hover .player-name { color: #6d28d9; }
+    body.light .player-level { color: #9ca3af; }
+    body.light .player-guild { color: #d1d5db; }
+    body.light .voc-badge.ek { background: #fee2e2; color: #dc2626; }
+    body.light .voc-badge.rp { background: #d1fae5; color: #059669; }
+    body.light .voc-badge.ms { background: #e0e7ff; color: #4338ca; }
+    body.light .voc-badge.ed { background: #ffedd5; color: #c2410c; }
+    body.light .elapsed { color: #111827; }
+    body.light .separator { color: #d1d5db; }
+    body.light .total { color: #9ca3af; }
+    body.light .progress-bar { background: #e5e7eb; }
+    body.light .remaining { color: #059669; }
+    body.light .exit-time { color: #d97706; }
+    body.light .queue-indicator { color: #6366f1; }
+    body.light .entry-window-text { color: #7c3aed !important; }
+    body.light .almost-text { color: #d97706 !important; }
+    body.light .badge.ok { background: #d1fae5; color: #059669; }
+    body.light .badge.almost { background: #fef3c7; color: #d97706; }
+    body.light .badge.entry-window { background: #ede9fe; color: #7c3aed; }
+    body.light .has-next { background: #e0e7ff; color: #4338ca; }
+    body.light .queue-inline { color: #059669; }
+    body.light .search-input { background: #fff; border-color: #d1d5db; color: #374151; }
+    body.light .search-input:focus { border-color: #6366f1; }
+    body.light .voc-filter-btn { background: #e5e7eb; color: #6b7280; border-color: #d1d5db; }
+    body.light .voc-filter-btn:hover { background: #d1d5db; }
+    body.light .voc-filter-btn.active { background: #e0e7ff; color: #4338ca; border-color: #6366f1; }
+    body.light .sort-select { background: #fff; border-color: #d1d5db; color: #374151; }
+    body.light .entry-window-row { background: #f5f0ff !important; }
+    body.light .entry-window-row:hover { background: #ede5ff !important; }
+    body.light .almost-row { background: #fffbeb !important; }
+    body.light .almost-row:hover { background: #fef3c7 !important; }
+    body.light .res-badge.active { background: #f3e8ff; color: #9333ea; }
+    body.light .res-badge.upcoming { background: #e0e7ff; color: #4338ca; }
+    body.light .res-type-badge.solo { background: #e0f2fe; color: #0284c7; }
+    body.light .res-type-badge.pt { background: #f3e8ff; color: #9333ea; }
+    body.light .toggle-btn { background: #e5e7eb; color: #6366f1; border-color: #d1d5db; }
+    body.light .toggle-btn:hover { background: #d1d5db; }
+    body.light .footer { color: #d1d5db; }
+    body.light .footer a { color: #6366f1; }
+    body.light .refresh-btn { background: #e5e7eb; color: #6366f1; border-color: #d1d5db; }
+    body.light .refresh-btn:hover { background: #d1d5db; color: #4338ca; }
+    body.light .refresh-page-btn { background: #fff; color: #6366f1; border-color: #d1d5db; }
+    body.light .refresh-page-btn:hover { background: #e5e7eb; border-color: #6366f1; }
+    body.light .theme-toggle-btn { background: #fff; border-color: #d1d5db; }
+    body.light .theme-toggle-btn:hover { background: #e5e7eb; border-color: #6366f1; }
+    body.light .modal-overlay { background: rgba(0,0,0,0.3); }
+    body.light .modal { background: #fff; border-color: #e5e7eb; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+    body.light .modal h2 { color: #111827; }
+    body.light .modal .modal-code { color: #6366f1; }
+    body.light .modal .queue-loading { color: #9ca3af; }
+    body.light .modal .queue-loading .spinner { border-color: #e5e7eb; border-top-color: #6366f1; }
+    body.light .modal .queue-item { background: #f9fafb; border-color: #e5e7eb; }
+    body.light .modal .queue-item .queue-pos { color: #6366f1; }
+    body.light .modal .queue-item .queue-player { color: #7c3aed; }
+    body.light .modal .queue-item .queue-time { color: #9ca3af; }
+    body.light .modal .queue-summary { background: #f5f7fa; border-color: #e5e7eb; }
+    body.light .modal .queue-summary .summary-label { color: #9ca3af; }
+    body.light .modal .queue-summary .summary-value { color: #111827; }
+    body.light .modal .queue-summary .free-at { color: #059669; }
+    body.light .modal .close-btn { background: #e5e7eb; color: #6b7280; border-color: #d1d5db; }
+    body.light .modal .close-btn:hover { background: #d1d5db; color: #111827; }
+    body.light .modal .error-msg { color: #dc2626; }
+    body.light .bot-indicator { color: #9ca3af; }
+    body.light .res-player { color: #9333ea; }
+    body.light .no-reserve { color: #d1d5db; }
   </style>
 </head>
 <body>
@@ -862,6 +966,9 @@ function renderHTML(
     <header>
       <h1><span>Crusaders</span> Respawn Monitor</h1>
       <div class="header-actions">
+        <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()" title="Alternar tema claro/escuro">
+          <span id="themeIcon">&#9728;</span>
+        </button>
         <button class="refresh-page-btn" id="refreshBtn" onclick="refreshPage()">
           &#x21bb; Atualizar
         </button>
@@ -919,7 +1026,7 @@ function renderHTML(
         <option value="remaining">Ordenar: Restante</option>
         <option value="level-desc">Ordenar: Level &#8595;</option>
         <option value="level-asc">Ordenar: Level &#8593;</option>
-        <option value="exit">Ordenar: Sai as</option>
+        <option value="exit">Ordenar: Livre as</option>
         <option value="respawn">Ordenar: Respawn</option>
       </select>
     </div>
@@ -932,7 +1039,7 @@ function renderHTML(
           <th>Jogador</th>
           <th>Tempo / Total</th>
           <th>Restante</th>
-          <th>Sai as</th>
+          <th>Livre as</th>
           <th>Fila</th>
           <th>Status</th>
         </tr>
@@ -948,7 +1055,7 @@ function renderHTML(
     <div class="collapsible">
       <div class="section-title">
         Reservas em Respawns Livres <span class="count">${freeReservations.length}</span>
-        <button class="toggle-btn" onclick="document.getElementById('freeResTable').style.display = document.getElementById('freeResTable').style.display === 'none' ? 'block' : 'none'">
+        <button class="toggle-btn" onclick="toggleSection('freeResTable')">
           Mostrar / Ocultar
         </button>
       </div>
@@ -967,7 +1074,7 @@ function renderHTML(
     <div class="collapsible">
       <div class="section-title">
         Respawns Livres <span class="count">${data.freeRespawns.length} / ${data.catalogTotal}</span>
-        <button class="toggle-btn" onclick="document.getElementById('freeTable').style.display = document.getElementById('freeTable').style.display === 'none' ? 'block' : 'none'">
+        <button class="toggle-btn" onclick="toggleSection('freeTable')">
           Mostrar / Ocultar
         </button>
       </div>
@@ -1086,7 +1193,88 @@ function renderHTML(
       if (e.key === 'Escape') closeModal();
     });
 
-    // Filter and sort
+    // --- Theme toggle ---
+    function toggleTheme() {
+      var isLight = document.body.classList.toggle('light');
+      localStorage.setItem('dashTheme', isLight ? 'light' : 'dark');
+      document.getElementById('themeIcon').innerHTML = isLight ? '&#9789;' : '&#9728;';
+    }
+
+    // Restore theme immediately
+    (function() {
+      if (localStorage.getItem('dashTheme') === 'light') {
+        document.body.classList.add('light');
+        document.getElementById('themeIcon').innerHTML = '&#9789;';
+      }
+    })();
+
+    // --- Section toggle ---
+    function toggleSection(id) {
+      var el = document.getElementById(id);
+      if (el) {
+        el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        saveState();
+      }
+    }
+
+    // --- State persistence ---
+    function saveState() {
+      try {
+        var sortEl = document.getElementById('sortSelect');
+        var searchEl = document.getElementById('searchFilter');
+        var activeBtn = document.querySelector('.voc-filter-btn.active');
+        var state = {
+          sort: sortEl ? sortEl.value : 'code',
+          search: searchEl ? searchEl.value : '',
+          voc: activeBtn ? activeBtn.dataset.voc : 'all',
+          freeExpanded: document.getElementById('freeTable') && document.getElementById('freeTable').style.display !== 'none' ? '1' : '0',
+          freeResExpanded: document.getElementById('freeResTable') && document.getElementById('freeResTable').style.display !== 'none' ? '1' : '0'
+        };
+        localStorage.setItem('dashState', JSON.stringify(state));
+      } catch(e) {}
+    }
+
+    function restoreState() {
+      try {
+        var raw = localStorage.getItem('dashState');
+        if (!raw) return;
+        var state = JSON.parse(raw);
+
+        if (state.sort) {
+          var sortEl = document.getElementById('sortSelect');
+          if (sortEl) sortEl.value = state.sort;
+        }
+
+        if (state.search) {
+          var searchEl = document.getElementById('searchFilter');
+          if (searchEl) searchEl.value = state.search;
+        }
+
+        if (state.voc && state.voc !== 'all') {
+          document.querySelectorAll('.voc-filter-btn').forEach(function(b) {
+            b.classList.remove('active');
+            if (b.dataset.voc === state.voc) b.classList.add('active');
+          });
+        }
+
+        if (state.freeExpanded === '1') {
+          var ft = document.getElementById('freeTable');
+          if (ft) ft.style.display = 'block';
+        }
+
+        if (state.freeResExpanded === '1') {
+          var frt = document.getElementById('freeResTable');
+          if (frt) frt.style.display = 'block';
+        }
+
+        // Apply if any filter/sort was restored
+        if (state.sort !== 'code' || state.search || (state.voc && state.voc !== 'all')) {
+          applyFilters();
+        }
+      } catch(e) {}
+    }
+
+    // --- Filter and sort ---
     function applyFilters() {
       var search = document.getElementById('searchFilter').value.toLowerCase();
       var activeBtn = document.querySelector('.voc-filter-btn.active');
@@ -1120,17 +1308,18 @@ function renderHTML(
       sorted.forEach(function(row) { tbody.appendChild(row); });
     }
 
-    document.getElementById('searchFilter').addEventListener('input', applyFilters);
-    document.getElementById('sortSelect').addEventListener('change', applyFilters);
+    document.getElementById('searchFilter').addEventListener('input', function() { applyFilters(); saveState(); });
+    document.getElementById('sortSelect').addEventListener('change', function() { applyFilters(); saveState(); });
     document.querySelectorAll('.voc-filter-btn').forEach(function(btn) {
       btn.addEventListener('click', function() {
         document.querySelectorAll('.voc-filter-btn').forEach(function(b) { b.classList.remove('active'); });
         btn.classList.add('active');
         applyFilters();
+        saveState();
       });
     });
 
-    // Smart auto-refresh: pauses when modal is open
+    // --- Smart auto-refresh: pauses when modal is open ---
     var refreshInterval = 5000;
     var refreshTimer = null;
     var modalOpen = false;
@@ -1139,6 +1328,7 @@ function renderHTML(
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(function() {
         if (!modalOpen) {
+          saveState();
           window.location.reload();
         } else {
           scheduleRefresh();
@@ -1150,6 +1340,7 @@ function renderHTML(
     function refreshPage() {
       var btn = document.getElementById('refreshBtn');
       if (btn) { btn.classList.add('loading'); btn.innerHTML = '&#x21bb; Atualizando...'; }
+      saveState();
       window.location.reload();
     }
 
@@ -1157,7 +1348,6 @@ function renderHTML(
     var _origShowQueueInfo = showQueueInfo;
     showQueueInfo = function(code, name) {
       modalOpen = true;
-      // Reset auto-refresh timer when opening modal
       if (refreshTimer) clearTimeout(refreshTimer);
       _origShowQueueInfo(code, name);
     };
@@ -1166,10 +1356,11 @@ function renderHTML(
     closeModal = function() {
       modalOpen = false;
       _origCloseModal();
-      // Resume auto-refresh after closing modal
       scheduleRefresh();
     };
 
+    // Restore state from previous page load, then start auto-refresh
+    restoreState();
     scheduleRefresh();
   </script>
 </body>
