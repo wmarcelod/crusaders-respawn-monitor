@@ -4,3 +4,5 @@ dist/
 logs/
 bot-uid.json
 *.log
+ts3bridge/build/
+ts3bridge/lib/

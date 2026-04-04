@@ -1,10 +1,9 @@
 package com.crusaders.bridge;
 
 import com.github.manevolent.ts3j.protocol.socket.client.LocalTeamspeakClientSocket;
+import com.github.manevolent.ts3j.protocol.client.ClientConnectionState;
 import com.github.manevolent.ts3j.identity.LocalIdentity;
-import com.github.manevolent.ts3j.event.TS3Listener;
-import com.github.manevolent.ts3j.event.TextMessageEvent;
-import com.github.manevolent.ts3j.event.DisconnectedEvent;
+import com.github.manevolent.ts3j.event.*;
 import com.github.manevolent.ts3j.api.Channel;
 import com.github.manevolent.ts3j.api.Client;
 import com.google.gson.Gson;
@@ -13,9 +12,12 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.Headers;
 
 import java.io.*;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.GeneralSecurityException;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -23,9 +25,12 @@ import java.util.concurrent.*;
  * TS3 Bridge - Connects to a TS3 server as a regular client using the
  * ts3j library (Java implementation of the TS3 voice protocol).
  *
+ * Uses an event-driven channel cache (onChannelList, onChannelEdit,
+ * onChannelDescriptionChanged) since getChannelInfo() is not available
+ * on all servers.
+ *
  * Exposes an HTTP API so the Crusaders Respawn Monitor can query
- * channels, clients, descriptions, and send/receive messages
- * without needing a local TS3 desktop client or ServerQuery credentials.
+ * channels, clients, descriptions, and send/receive messages.
  */
 public class TS3Bridge {
 
@@ -33,22 +38,30 @@ public class TS3Bridge {
     private static volatile boolean connected = false;
     private static final CopyOnWriteArrayList<Map<String, Object>> incomingMessages = new CopyOnWriteArrayList<>();
     private static final Gson gson = new Gson();
+    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+
+    // Event-driven channel cache: channelId -> {channel_name, channel_description, ...}
+    private static final ConcurrentHashMap<Integer, ConcurrentHashMap<String, String>> channelCache = new ConcurrentHashMap<>();
+
+    // Client cache from join/leave events
+    private static final ConcurrentHashMap<Integer, ConcurrentHashMap<String, String>> clientCache = new ConcurrentHashMap<>();
 
     // Configuration
     private static String serverAddr;
     private static int serverPort;
     private static String nickname;
     private static int httpPort;
-    private static String identityFile;
+    private static final Path DATA_DIR = Paths.get("data");
+    private static final Path IDENTITY_FILE = DATA_DIR.resolve("identity.ini");
+    private static final int IDENTITY_LEVEL = 10;
 
     // ========== MAIN ==========
 
     public static void main(String[] args) throws Exception {
-        serverAddr = env("TS_SERVER", "crusaders.expto.com.br");
-        serverPort = Integer.parseInt(env("TS_SERVER_PORT", "9987"));
+        serverAddr = env("TS_SERVER", "169.197.140.171");
+        serverPort = Integer.parseInt(env("TS_SERVER_PORT", "9989"));
         nickname = env("TS_NICKNAME", "CrusaderBridge");
         httpPort = Integer.parseInt(env("BRIDGE_PORT", "8080"));
-        identityFile = env("IDENTITY_FILE", "/data/identity.ini");
 
         System.out.println("============================================");
         System.out.println("  TS3 Bridge (ts3j - Java)");
@@ -58,13 +71,15 @@ public class TS3Bridge {
         System.out.println("  HTTP API:  0.0.0.0:" + httpPort);
         System.out.println("============================================");
 
-        // Start HTTP server first (non-blocking) so /api/status is available immediately
+        Files.createDirectories(DATA_DIR);
+
+        // Start HTTP server first (non-blocking)
         startHttpServer();
 
         // Load or create TS3 identity
-        LocalIdentity identity = loadOrCreateIdentity();
+        LocalIdentity identity = loadIdentity();
 
-        // Connect to TS3 + reconnection loop (blocks forever)
+        // Connect (blocks forever with reconnection)
         connectWithRetry(identity);
     }
 
@@ -75,29 +90,81 @@ public class TS3Bridge {
 
     // ========== IDENTITY ==========
 
-    private static LocalIdentity loadOrCreateIdentity() throws Exception {
-        File file = new File(identityFile);
-
-        if (file.exists()) {
-            try {
-                LocalIdentity id = LocalIdentity.read(file);
-                System.out.println("[Bridge] Loaded identity from " + file.getAbsolutePath());
-                return id;
-            } catch (Exception e) {
-                System.err.println("[Bridge] Failed to load identity: " + e.getMessage());
+    private static LocalIdentity loadIdentity() throws IOException, GeneralSecurityException {
+        if (Files.exists(IDENTITY_FILE)) {
+            try (InputStream in = Files.newInputStream(IDENTITY_FILE)) {
+                LocalIdentity identity = LocalIdentity.read(in);
+                System.out.println("[Bridge] Loaded identity (level " + identity.getSecurityLevel() + ")");
+                if (identity.getSecurityLevel() < IDENTITY_LEVEL) {
+                    System.out.println("[Bridge] Improving security level to " + IDENTITY_LEVEL + "...");
+                    identity.improveSecurity(IDENTITY_LEVEL);
+                    saveIdentity(identity);
+                }
+                return identity;
             }
         }
 
-        System.out.println("[Bridge] Generating new identity (security level 8)...");
-        LocalIdentity id = LocalIdentity.generateNew(8);
+        System.out.println("[Bridge] Generating new identity (security level " + IDENTITY_LEVEL + ")...");
+        LocalIdentity identity = LocalIdentity.generateNew(IDENTITY_LEVEL);
+        saveIdentity(identity);
         System.out.println("[Bridge] Identity ready");
+        return identity;
+    }
 
-        File parent = file.getParentFile();
-        if (parent != null) parent.mkdirs();
-        id.save(file, new HashMap<>());
-        System.out.println("[Bridge] Saved identity to " + file.getAbsolutePath());
+    private static void saveIdentity(LocalIdentity identity) throws IOException {
+        try (OutputStream out = Files.newOutputStream(IDENTITY_FILE)) {
+            identity.save(out);
+        }
+    }
 
-        return id;
+    // ========== CHANNEL CACHE ==========
+
+    private static void mergeChannelEvent(int channelId, Map<String, String> update) {
+        channelCache.compute(channelId, (_key, existing) -> {
+            ConcurrentHashMap<String, String> merged = existing == null
+                    ? new ConcurrentHashMap<>()
+                    : new ConcurrentHashMap<>(existing);
+            merged.putAll(update);
+            return merged;
+        });
+    }
+
+    /**
+     * Sync channel list from the server using listChannels().
+     * This works on the Crusaders server and populates the cache.
+     */
+    private static void syncChannelList() {
+        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
+        try {
+            int count = 0;
+            for (Channel channel : tsClient.listChannels()) {
+                count++;
+                mergeChannelEvent(channel.getId(), channel.getMap());
+            }
+            System.out.println("[Bridge] Synced " + count + " channels into cache");
+        } catch (Exception ex) {
+            System.out.println("[Bridge] syncChannelList failed: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Sync client list from the server using listClients().
+     */
+    private static void syncClientList() {
+        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
+        try {
+            ConcurrentHashMap<Integer, ConcurrentHashMap<String, String>> fresh = new ConcurrentHashMap<>();
+            int count = 0;
+            for (Client cl : tsClient.listClients()) {
+                count++;
+                fresh.put(cl.getId(), new ConcurrentHashMap<>(cl.getMap()));
+            }
+            clientCache.clear();
+            clientCache.putAll(fresh);
+            System.out.println("[Bridge] Synced " + count + " clients into cache");
+        } catch (Exception ex) {
+            System.out.println("[Bridge] syncClientList failed: " + ex.getMessage());
+        }
     }
 
     // ========== TS3 CONNECTION ==========
@@ -114,9 +181,56 @@ public class TS3Bridge {
             LocalTeamspeakClientSocket client = new LocalTeamspeakClientSocket();
             client.setIdentity(identity);
             client.setNickname(nickname);
+            client.setHWID("CrusaderBridge");
 
-            // Event listener
+            // Event listener for channel cache + messages
             client.addListener(new TS3Listener() {
+                @Override
+                public void onConnected(ConnectedEvent e) {
+                    System.out.println("[Bridge] onConnected event received");
+                    // Schedule initial sync after connection stabilizes
+                    scheduler.schedule(() -> {
+                        syncChannelList();
+                        syncClientList();
+                    }, 2, TimeUnit.SECONDS);
+                }
+
+                @Override
+                public void onChannelList(ChannelListEvent e) {
+                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                }
+
+                @Override
+                public void onChannelEdit(ChannelEditedEvent e) {
+                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                }
+
+                @Override
+                public void onChannelDescriptionChanged(ChannelDescriptionEditedEvent e) {
+                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                }
+
+                @Override
+                public void onChannelCreate(ChannelCreateEvent e) {
+                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                }
+
+                @Override
+                public void onChannelDeleted(ChannelDeletedEvent e) {
+                    channelCache.remove(e.getChannelId());
+                }
+
+                @Override
+                public void onClientJoin(ClientJoinEvent e) {
+                    ConcurrentHashMap<String, String> data = new ConcurrentHashMap<>(e.getMap());
+                    clientCache.put(e.getClientId(), data);
+                }
+
+                @Override
+                public void onClientLeave(ClientLeaveEvent e) {
+                    clientCache.remove(e.getClientId());
+                }
+
                 @Override
                 public void onTextMessage(TextMessageEvent e) {
                     // Ignore own messages
@@ -145,18 +259,17 @@ public class TS3Bridge {
                 public void onDisconnected(DisconnectedEvent e) {
                     connected = false;
                     System.out.println("[Bridge] Disconnected from server");
+                    scheduleReconnect(identity);
                 }
             });
 
             System.out.println("[Bridge] Connecting to " + serverAddr + ":" + serverPort + "...");
             client.connect(
-                new InetSocketAddress(InetAddress.getByName(serverAddr), serverPort),
-                "",       // no password
-                10000L    // 10 second timeout
+                new InetSocketAddress(serverAddr, serverPort),
+                null,       // no password
+                20000L      // 20 second timeout
             );
-
-            // Subscribe to all channels so we can see all clients and receive events
-            client.subscribeAll();
+            client.waitForState(ClientConnectionState.CONNECTED, 20000L);
 
             tsClient = client;
             connected = true;
@@ -165,19 +278,27 @@ public class TS3Bridge {
         } catch (Exception e) {
             connected = false;
             System.err.println("[Bridge] Connection failed: " + e.getMessage());
+            scheduleReconnect(identity);
         }
     }
 
-    private static void connectWithRetry(LocalIdentity identity) {
-        // Initial connection attempt
-        connectToTS3(identity);
-
-        // Reconnection scheduler
-        ScheduledExecutorService sched = Executors.newScheduledThreadPool(1);
-        sched.scheduleAtFixedRate(() -> {
+    private static void scheduleReconnect(LocalIdentity identity) {
+        scheduler.schedule(() -> {
             if (!connected) {
                 System.out.println("[Bridge] Attempting reconnection...");
                 connectToTS3(identity);
+            }
+        }, 5, TimeUnit.SECONDS);
+    }
+
+    private static void connectWithRetry(LocalIdentity identity) {
+        connectToTS3(identity);
+
+        // Periodic channel/client cache refresh
+        scheduler.scheduleAtFixedRate(() -> {
+            if (connected) {
+                syncChannelList();
+                syncClientList();
             }
         }, 30, 30, TimeUnit.SECONDS);
 
@@ -246,9 +367,6 @@ public class TS3Bridge {
         ex.sendResponseHeaders(204, -1);
     }
 
-    /**
-     * Helper to build JSON objects with mixed value types.
-     */
     private static Map<String, Object> jsonObj(Object... pairs) {
         Map<String, Object> map = new LinkedHashMap<>();
         for (int i = 0; i < pairs.length; i += 2) {
@@ -279,70 +397,58 @@ public class TS3Bridge {
         status.put("connected", connected);
         status.put("server", serverAddr + ":" + serverPort);
         status.put("nickname", nickname);
-
-        if (connected && tsClient != null) {
-            try {
-                int channelCount = 0;
-                for (Channel ch : tsClient.listChannels()) channelCount++;
-                int clientCount = 0;
-                for (Client cl : tsClient.listClients()) clientCount++;
-                status.put("channels", channelCount);
-                status.put("clients", clientCount);
-            } catch (Exception e) {
-                status.put("channels", 0);
-                status.put("clients", 0);
-                status.put("error", e.getMessage());
-            }
-        } else {
-            status.put("channels", 0);
-            status.put("clients", 0);
-        }
+        status.put("channels", channelCache.size());
+        status.put("clients", clientCache.size());
 
         sendJson(ex, 200, status);
     }
 
     /**
-     * GET /api/channels - List all channels with name and client count.
+     * GET /api/channels - List all channels from cache.
      */
     private static void handleChannels(HttpExchange ex) throws IOException {
         if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
 
-        if (!connected || tsClient == null) {
+        if (!connected) {
             sendJson(ex, 503, jsonObj("error", "Not connected"));
             return;
         }
 
-        try {
-            List<Map<String, Object>> channels = new ArrayList<>();
-            for (Channel ch : tsClient.listChannels()) {
-                channels.add(jsonObj(
-                    "cid", ch.getId(),
-                    "name", ch.getName(),
-                    "total_clients", ch.getTotalClients(),
-                    "description", ""  // Use /api/channel/{cid}/description for full desc
-                ));
+        List<Map<String, Object>> channels = new ArrayList<>();
+        for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : channelCache.entrySet()) {
+            int cid = entry.getKey();
+            Map<String, String> ch = entry.getValue();
+            String name = safe(ch.get("channel_name"));
+            String totalClientsStr = ch.getOrDefault("total_clients", "0");
+            int totalClients;
+            try {
+                totalClients = Integer.parseInt(totalClientsStr);
+            } catch (NumberFormatException e) {
+                totalClients = 0;
             }
-            sendJson(ex, 200, channels);
-        } catch (Exception e) {
-            sendJson(ex, 500, jsonObj("error", e.getMessage()));
+
+            channels.add(jsonObj(
+                "cid", cid,
+                "name", name,
+                "total_clients", totalClients
+            ));
         }
+        sendJson(ex, 200, channels);
     }
 
     /**
-     * GET /api/channel/{cid}/description - Get channel description by ID.
+     * GET /api/channel/{cid}/description - Get channel description from cache.
      */
     private static void handleChannelDescription(HttpExchange ex) throws IOException {
         if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
 
-        if (!connected || tsClient == null) {
+        if (!connected) {
             sendText(ex, 503, "Not connected");
             return;
         }
 
-        // Parse CID from URL: /api/channel/123/description
         String path = ex.getRequestURI().getPath();
         String[] parts = path.split("/");
-        // Expected: ["", "api", "channel", "123", "description"]
         if (parts.length < 5) {
             sendText(ex, 400, "Invalid URL format. Use /api/channel/{cid}/description");
             return;
@@ -356,22 +462,19 @@ public class TS3Bridge {
             return;
         }
 
-        try {
-            Channel ch = tsClient.getChannelInfo(cid);
-            if (ch == null) {
-                sendText(ex, 404, "Channel not found");
-                return;
-            }
-            // Access description from the underlying property map
-            String desc = ch.get("channel_description");
-            sendText(ex, 200, desc != null ? desc : "");
-        } catch (Exception e) {
-            sendText(ex, 500, "Error: " + e.getMessage());
+        ConcurrentHashMap<String, String> ch = channelCache.get(cid);
+        if (ch == null) {
+            sendText(ex, 404, "Channel not found in cache");
+            return;
         }
+
+        String desc = safe(ch.get("channel_description"));
+        sendText(ex, 200, desc);
     }
 
     /**
-     * GET /api/clients - List all connected clients (excludes serverquery bots).
+     * GET /api/clients - List all connected clients from cache.
+     * Falls back to listClients() if cache is empty.
      */
     private static void handleClients(HttpExchange ex) throws IOException {
         if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
@@ -381,10 +484,10 @@ public class TS3Bridge {
             return;
         }
 
+        // Try live listClients() first (it works on this server)
         try {
             List<Map<String, Object>> clients = new ArrayList<>();
             for (Client cl : tsClient.listClients()) {
-                // Skip serverquery clients (client_type=1)
                 int clientType = cl.getInt("client_type");
                 if (clientType == 1) continue;
 
@@ -396,9 +499,40 @@ public class TS3Bridge {
                 ));
             }
             sendJson(ex, 200, clients);
+            return;
         } catch (Exception e) {
-            sendJson(ex, 500, jsonObj("error", e.getMessage()));
+            System.out.println("[Bridge] listClients() failed, using cache: " + e.getMessage());
         }
+
+        // Fallback to client cache
+        List<Map<String, Object>> clients = new ArrayList<>();
+        for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : clientCache.entrySet()) {
+            int clid = entry.getKey();
+            Map<String, String> cl = entry.getValue();
+            String clientTypeStr = cl.getOrDefault("client_type", "0");
+            int clientType;
+            try {
+                clientType = Integer.parseInt(clientTypeStr);
+            } catch (NumberFormatException e) {
+                clientType = 0;
+            }
+            if (clientType == 1) continue;
+
+            int cidVal;
+            try {
+                cidVal = Integer.parseInt(cl.getOrDefault("cid", cl.getOrDefault("ctid", "0")));
+            } catch (NumberFormatException e) {
+                cidVal = 0;
+            }
+
+            clients.add(jsonObj(
+                "clid", clid,
+                "cid", cidVal,
+                "nickname", safe(cl.get("client_nickname")),
+                "client_type", clientType
+            ));
+        }
+        sendJson(ex, 200, clients);
     }
 
     /**
@@ -412,17 +546,16 @@ public class TS3Bridge {
             return;
         }
 
-        // Parse UID from URL: /api/client/uid/{uid}
         String path = ex.getRequestURI().getPath();
         String prefix = "/api/client/uid/";
         if (path.length() <= prefix.length()) {
             sendJson(ex, 400, jsonObj("error", "Missing UID"));
             return;
         }
-        String uid = path.substring(prefix.length());
+        String uid = java.net.URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
 
+        // Try live listClients() first
         try {
-            // First pass: check listClients (might have UID directly)
             for (Client cl : tsClient.listClients()) {
                 String clientUid = cl.getUniqueIdentifier();
                 if (uid.equals(clientUid)) {
@@ -435,34 +568,32 @@ public class TS3Bridge {
                     return;
                 }
             }
-
-            // Second pass: get detailed info for each client (clientinfo includes UID)
-            List<Integer> clientIds = new ArrayList<>();
-            for (Client cl : tsClient.listClients()) {
-                clientIds.add(cl.getId());
-            }
-
-            for (int clid : clientIds) {
-                try {
-                    Client info = tsClient.getClientInfo(clid);
-                    if (info != null && uid.equals(info.getUniqueIdentifier())) {
-                        sendJson(ex, 200, jsonObj(
-                            "clid", info.getId(),
-                            "cid", info.getChannelId(),
-                            "nickname", info.getNickname(),
-                            "client_type", 0
-                        ));
-                        return;
-                    }
-                } catch (Exception ignored) {
-                    // Client may have disconnected between list and info calls
-                }
-            }
-
-            sendJson(ex, 404, jsonObj("error", "Client not found"));
         } catch (Exception e) {
-            sendJson(ex, 500, jsonObj("error", e.getMessage()));
+            System.out.println("[Bridge] listClients() for UID lookup failed: " + e.getMessage());
         }
+
+        // Fallback: search client cache
+        for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : clientCache.entrySet()) {
+            Map<String, String> cl = entry.getValue();
+            String clientUid = cl.get("client_unique_identifier");
+            if (uid.equals(clientUid)) {
+                int cidVal;
+                try {
+                    cidVal = Integer.parseInt(cl.getOrDefault("cid", cl.getOrDefault("ctid", "0")));
+                } catch (NumberFormatException e) {
+                    cidVal = 0;
+                }
+                sendJson(ex, 200, jsonObj(
+                    "clid", entry.getKey(),
+                    "cid", cidVal,
+                    "nickname", safe(cl.get("client_nickname")),
+                    "client_type", 0
+                ));
+                return;
+            }
+        }
+
+        sendJson(ex, 404, jsonObj("error", "Client not found"));
     }
 
     /**
@@ -512,7 +643,6 @@ public class TS3Bridge {
 
     /**
      * GET /api/messages - Get and consume incoming messages.
-     * Messages are cleared after being read (consumed).
      */
     private static void handleMessages(HttpExchange ex) throws IOException {
         if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
