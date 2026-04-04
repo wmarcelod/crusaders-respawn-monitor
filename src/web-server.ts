@@ -100,19 +100,27 @@ function triggerBotQuery(code: string, nexts: number, remainingMin?: number): vo
   processBotQueue();
 }
 
-/** Check which respawns had nexts changes and enqueue bot queries.
+const REQUERY_INTERVAL_MS = 300_000; // Re-query active queues every 5 minutes
+const lastQueryTime: Record<string, number> = {};
+
+/** Check which respawns need bot queries and enqueue them.
+ *  Triggers on: nexts count change OR periodic re-query (every 5min) for active queues.
  *  If plugin is connected, add to pendingPluginQueries (plugin will handle it).
  *  Otherwise, use bridge fallback (triggerBotQuery). */
 function checkAndTriggerBotQueries(entries: RespawnEntry[]): void {
+  const now = Date.now();
   for (const e of entries) {
     if (e.nexts > 0) {
       const prev = lastKnownNexts[e.code] ?? -1;
-      if (prev !== e.nexts) {
+      const nextsChanged = prev !== e.nexts;
+      const lastQuery = lastQueryTime[e.code] ?? 0;
+      const needsRequery = (now - lastQuery) >= REQUERY_INTERVAL_MS;
+
+      if (nextsChanged || needsRequery) {
+        lastQueryTime[e.code] = now;
         if (isPluginConnected()) {
-          // Plugin mode: queue for local agent to pick up
           pendingPluginQueries.set(e.code, { nexts: e.nexts, remainingMin: e.remainingMinutes });
         } else {
-          // Fallback: use bridge temp connection
           triggerBotQuery(e.code, e.nexts, e.remainingMinutes);
         }
       }
