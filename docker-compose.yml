@@ -1,18 +1,32 @@
 version: "3.8"
 
 services:
+  # Java bridge: connects to TS3 server via client protocol (ts3j)
+  ts3bridge:
+    build: ./ts3bridge
+    environment:
+      - TS_SERVER=${TS_SERVER:-crusaders.expto.com.br}
+      - TS_SERVER_PORT=${TS_SERVER_PORT:-9987}
+      - TS_NICKNAME=${TS_NICKNAME:-CrusaderBridge}
+      - BRIDGE_PORT=8080
+    volumes:
+      - bridge-data:/data
+    restart: unless-stopped
+
+  # Node.js dashboard: Crusaders Respawn Monitor
   dashboard:
     build: .
     ports:
       - "3000:3000"
     environment:
-      - TS_MODE=serverquery
-      - TS_HOST=${TS_HOST}
-      - TS_QUERY_PORT=${TS_QUERY_PORT:-10011}
-      - TS_QUERY_USER=${TS_QUERY_USER:-serveradmin}
-      - TS_QUERY_PASS=${TS_QUERY_PASS}
-      - TS_VIRTUAL_SERVER=${TS_VIRTUAL_SERVER:-1}
+      - TS_MODE=bridge
+      - BRIDGE_URL=http://ts3bridge:8080
       - WEB_PORT=3000
     volumes:
       - ./logs:/app/logs
+    depends_on:
+      - ts3bridge
     restart: unless-stopped
+
+volumes:
+  bridge-data:
