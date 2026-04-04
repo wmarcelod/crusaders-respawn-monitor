@@ -92,7 +92,7 @@ function parseClaimTime(str: string): number {
   return h * 60 + m;
 }
 
-function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" | "totalQueueMinutes" | "freeAt"> {
+export function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" | "totalQueueMinutes" | "freeAt"> {
   let currentPlayer = "";
   let currentPlayerUid = "";
   let claimTime = "";
