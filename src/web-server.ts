@@ -25,7 +25,8 @@ import { processSnapshot, getLogStats, getPlayerProfile, getRespawnHistory, getP
 import { fetchCharacter, fetchCharacterFull, fetchCharacters, extractCharNames, shortVocation, TibiaCharacter, TibiaCharacterFull } from "./tibia-api";
 import { startClientTracker, getTrackedClients, getTrackedClient, resolveFullNickname } from "./client-tracker";
 import { getTSConnectionInfo } from "./clientquery";
-import { getTopKilled, getCreatureEconomy, getMarketOverview, getItemHistory, searchItems, fetchKillStatistics } from "./kill-stats";
+// DISABLED: Economy features (will be reworked)
+// import { getTopKilled, getCreatureEconomy, getMarketOverview, getItemHistory, searchItems, fetchKillStatistics } from "./kill-stats";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -815,9 +816,9 @@ function renderHTML(
     .fav-star:hover { opacity: 0.8; }
     .fav-star.active { opacity: 1; color: #fbbf24; }
     .fav-filter-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-    .fav-filter-btn { background: #1e2030; color: #818cf8; border: 1px solid #2e3150; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.8em; }
+    .fav-filter-btn { background: #1e2030; color: #818cf8; border: 1px solid #2e3150; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85em; font-weight: 500; transition: all 0.2s; }
     .fav-filter-btn:hover { background: #2e3150; }
-    .fav-filter-btn.active { background: #312e81; border-color: #818cf8; }
+    .fav-filter-btn.active { background: #312e81; border-color: #fbbf24; color: #fbbf24; box-shadow: 0 0 8px rgba(251,191,36,0.3); }
     .nav-links { display: flex; gap: 12px; margin-top: 8px; }
     .nav-link { color: #818cf8; text-decoration: none; font-size: 0.85em; padding: 4px 12px; border: 1px solid #2e3150; border-radius: 8px; background: #1e2030; }
     .nav-link:hover { background: #2e3150; text-decoration: none; }
@@ -1120,8 +1121,6 @@ function renderHTML(
         <h1><span>Crusaders</span> Respawn Monitor</h1>
         <div class="nav-links">
           <a href="/" class="nav-link current">Dashboard</a>
-          <a href="/agenda" class="nav-link">Agenda</a>
-          <a href="/economy" class="nav-link">Economia</a>
         </div>
       </div>
       <div class="header-actions">
@@ -1162,7 +1161,7 @@ function renderHTML(
       </div>
     </div>
 
-    <div class="section-title">Respawns Ocupados <span class="count">${data.totalRespawns}</span></div>
+    <div class="section-title">Respawns Ocupados <span class="count" id="respawnCount">${data.totalRespawns}</span></div>
 
     <div class="filter-bar">
       <button class="fav-filter-btn" id="favFilterBtn" onclick="toggleFavFilter()">★ Favoritos</button>
@@ -1435,20 +1434,30 @@ function renderHTML(
       var activeBtn = document.querySelector('.voc-filter-btn.active');
       var activeVoc = activeBtn ? activeBtn.dataset.voc : 'all';
       var sortBy = document.getElementById('sortSelect').value;
+      var favs = favFilterActive ? getFavorites() : null;
 
       var tbody = document.querySelector('table tbody');
       var rows = Array.from(tbody.querySelectorAll('tr'));
+      var visibleCount = 0;
 
       rows.forEach(function(row) {
         var player = (row.dataset.player || '').toLowerCase();
         var respawn = (row.dataset.respawn || '').toLowerCase();
+        var code = row.dataset.code || '';
         var voc = row.dataset.voc || '';
 
-        var matchSearch = !search || player.includes(search) || respawn.includes(search);
+        var matchSearch = !search || player.includes(search) || respawn.includes(search) || code.toLowerCase().includes(search);
         var matchVoc = activeVoc === 'all' || voc === activeVoc;
+        var matchFav = !favs || favs.includes(code);
 
-        row.style.display = (matchSearch && matchVoc) ? '' : 'none';
+        var visible = matchSearch && matchVoc && matchFav;
+        row.style.display = visible ? '' : 'none';
+        if (visible) visibleCount++;
       });
+
+      // Update counter badge
+      var badge = document.getElementById('respawnCount');
+      if (badge) badge.textContent = visibleCount;
 
       var sortDir = (document.getElementById('sortSelect').dataset.dir || 'asc') === 'asc' ? 1 : -1;
       var sorted = rows.sort(function(a, b) {
@@ -1557,6 +1566,7 @@ function renderHTML(
       else favs.push(code);
       saveFavorites(favs);
       updateFavStars();
+      if (favFilterActive) applyFilters();
     }
     function updateFavStars() {
       var favs = getFavorites();
@@ -1568,21 +1578,7 @@ function renderHTML(
     function toggleFavFilter() {
       favFilterActive = !favFilterActive;
       document.getElementById('favFilterBtn').classList.toggle('active', favFilterActive);
-      applyFavFilter();
-    }
-    function applyFavFilter() {
-      if (!favFilterActive) {
-        document.querySelectorAll('#respawnTable tbody tr').forEach(function(r) {
-          r.style.display = '';
-        });
-        applyFilters(); // reapply other filters
-        return;
-      }
-      var favs = getFavorites();
-      document.querySelectorAll('#respawnTable tbody tr').forEach(function(r) {
-        var code = r.dataset.code;
-        r.style.display = favs.includes(code) ? '' : 'none';
-      });
+      applyFilters();
     }
     updateFavStars();
   </script>
@@ -2818,8 +2814,6 @@ function renderEconomyHTML(): string {
         <h1><span>Crusaders</span> Economia - ${escapeHtml(WORLD)}</h1>
         <div class="nav-links">
           <a href="/" class="nav-link">Dashboard</a>
-          <a href="/agenda" class="nav-link">Agenda</a>
-          <a href="/economy" class="nav-link current">Economia</a>
         </div>
       </div>
     </header>
@@ -3548,17 +3542,10 @@ async function handleRequest(
       return;
     }
 
-    if (url === "/api/agenda" || url.startsWith("/api/agenda?")) {
-      const urlObj = new URL(url, "http://localhost");
-      const dateStr = urlObj.searchParams.get("date") || new Date().toISOString().split("T")[0];
-      const from = dateStr + " 00:00:00";
-      const to = dateStr + " 23:59:59";
-      const history = getHistoryByDateRange(from, to);
-      const chat = getChatMessagesByDate(from, to);
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify({ date: dateStr, history, chat }));
-      return;
-    }
+    // DISABLED: Agenda API
+    // if (url === "/api/agenda" || url.startsWith("/api/agenda?")) {
+    //   ...
+    // }
 
     // --- Chat API ---
     if (url === "/api/chat/messages" || url.startsWith("/api/chat/messages?")) {
@@ -3584,82 +3571,8 @@ async function handleRequest(
       return;
     }
 
-    // --- Kill Stats & Market API ---
-    if (url === "/api/kills" || url.startsWith("/api/kills?")) {
-      try {
-        const urlObj = new URL(url, "http://localhost");
-        const limit = parseInt(urlObj.searchParams.get("limit") || "50");
-        const data = await getTopKilled(limit);
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify(data));
-      } catch (err: any) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
-      }
-      return;
-    }
-
-    if (url.startsWith("/api/creature/")) {
-      try {
-        const race = decodeURIComponent(url.replace("/api/creature/", "").replace(/\?.*/, ""));
-        const data = await getCreatureEconomy(race);
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify(data));
-      } catch (err: any) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
-      }
-      return;
-    }
-
-    if (url === "/api/market" || url.startsWith("/api/market?")) {
-      try {
-        const urlObj = new URL(url, "http://localhost");
-        const limit = parseInt(urlObj.searchParams.get("limit") || "50");
-        const data = await getMarketOverview(limit);
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify(data));
-      } catch (err: any) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
-      }
-      return;
-    }
-
-    if (url.startsWith("/api/market/item/")) {
-      try {
-        const itemId = parseInt(url.replace("/api/market/item/", "").replace(/\?.*/, ""));
-        const history = await getItemHistory(itemId);
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify(history));
-      } catch (err: any) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
-      }
-      return;
-    }
-
-    if (url.startsWith("/api/items/search")) {
-      try {
-        const urlObj = new URL(url, "http://localhost");
-        const q = urlObj.searchParams.get("q") || "";
-        const data = await searchItems(q);
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify(data));
-      } catch (err: any) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
-      }
-      return;
-    }
-
-    // Economy page: /economy
-    if (url === "/economy" || url.startsWith("/economy?")) {
-      const html = renderEconomyHTML();
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(html);
-      return;
-    }
+    // DISABLED: Economy APIs & page (will be reworked)
+    // /api/kills, /api/creature, /api/market, /api/market/item, /api/items/search, /economy
 
     if (url === "/api/respawns") {
       const { respawns, reservations, activeReservations } = await fetchAllData();
@@ -3677,13 +3590,8 @@ async function handleRequest(
       return;
     }
 
-    // Agenda page: /agenda
-    if (url === "/agenda" || url.startsWith("/agenda?")) {
-      const html = renderAgendaHTML();
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(html);
-      return;
-    }
+    // DISABLED: Agenda page
+    // if (url === "/agenda" || url.startsWith("/agenda?")) { ... }
 
     // Respawn detail page: /respawn/<code>
     const respawnPageMatch = url.match(/^\/respawn\/([a-zA-Z0-9]+)$/);
