@@ -139,7 +139,12 @@ public class TS3Bridge {
             ConcurrentHashMap<String, String> merged = existing == null
                     ? new ConcurrentHashMap<>()
                     : new ConcurrentHashMap<>(existing);
-            merged.putAll(update);
+            // ConcurrentHashMap doesn't allow null values, filter them out
+            for (Map.Entry<String, String> entry : update.entrySet()) {
+                if (entry.getKey() != null && entry.getValue() != null) {
+                    merged.put(entry.getKey(), entry.getValue());
+                }
+            }
             return merged;
         });
     }
