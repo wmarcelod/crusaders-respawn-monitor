@@ -1,6 +1,7 @@
 import http from "http";
 import {
   getChannelDescription,
+  getChannelList,
   findRespawnListChannel,
   findRespawnNumberChannel,
 } from "./clientquery";
@@ -2431,10 +2432,14 @@ async function handleRequest(
 
     // Debug: raw channel list from bridge
     if (url === "/api/debug/channels") {
-      const { getChannelList } = await import("./clientquery");
-      const channels = await getChannelList();
-      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-      res.end(JSON.stringify({ total: channels.length, channels }, null, 2));
+      try {
+        const channels = await getChannelList();
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify({ total: channels.length, channels }, null, 2));
+      } catch (debugErr: any) {
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify({ error: debugErr.message, bridgeUrl: process.env.BRIDGE_URL }));
+      }
       return;
     }
 
