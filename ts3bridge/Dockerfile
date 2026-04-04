@@ -1,29 +1,34 @@
-FROM maven:3.9-eclipse-temurin-11 AS build
+FROM eclipse-temurin:21-jdk-jammy AS build
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Cache dependencies first
-COPY pom.xml .
-RUN mvn dependency:resolve dependency:resolve-plugins -q
+COPY scripts ./scripts
+COPY src ./src
+COPY vendor ./vendor
 
-# Build the project
-COPY src/ ./src/
-RUN mvn package -DskipTests -q
+RUN chmod +x ./scripts/*.sh && ./scripts/build.sh
 
-# Runtime image (small)
-FROM eclipse-temurin:11-jre-alpine
+FROM eclipse-temurin:21-jre-jammy AS runtime
+
 WORKDIR /app
 
-COPY --from=build /app/target/ts3bridge-1.0.0.jar ./ts3bridge.jar
+COPY --from=build /app/build ./build
+COPY --from=build /app/lib ./lib
+COPY --from=build /app/scripts ./scripts
+COPY --from=build /app/src ./src
 
-# Create data directory for identity persistence
-RUN mkdir -p /data
+RUN mkdir -p /app/data && chmod +x ./scripts/*.sh
 
-ENV TS_SERVER=crusaders.expto.com.br
-ENV TS_SERVER_PORT=9987
+ENV TS_SERVER=169.197.140.171
+ENV TS_SERVER_PORT=9989
 ENV TS_NICKNAME=CrusaderBridge
 ENV BRIDGE_PORT=8080
-ENV IDENTITY_FILE=/data/identity.ini
+ENV IDENTITY_FILE=/app/data/identity.ini
 
 EXPOSE 8080
 
-CMD ["java", "-jar", "ts3bridge.jar"]
+CMD ["./scripts/run.sh"]

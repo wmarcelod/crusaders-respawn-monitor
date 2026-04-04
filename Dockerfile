@@ -1,20 +1,36 @@
-# Stage 1: Build Java TS3 bridge (ts3j)
-FROM maven:3.9-eclipse-temurin-11 AS bridge-build
-WORKDIR /bridge
-COPY ts3bridge/pom.xml .
-RUN mvn dependency:resolve dependency:resolve-plugins -q
-COPY ts3bridge/src/ ./src/
-RUN mvn package -DskipTests -q
+# Stage 1: Build Java TS3 bridge (javac + vendored ts3j)
+FROM eclipse-temurin:21-jdk-jammy AS bridge-build
 
-# Stage 2: Node.js + Java runtime
-FROM node:20-slim
-
-# Install JRE for the bridge
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends openjdk-11-jre-headless && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /bridge
+
+COPY ts3bridge/scripts ./scripts
+COPY ts3bridge/src ./src
+COPY ts3bridge/vendor ./vendor
+
+RUN chmod +x ./scripts/*.sh && ./scripts/build.sh
+
+# Stage 2: Runtime with Java + Node.js
+FROM eclipse-temurin:21-jre-jammy
+
+# Install Node.js 20
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg && \
+    mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Copy bridge build artifacts
+COPY --from=bridge-build /bridge/build ./bridge/build
+COPY --from=bridge-build /bridge/lib ./bridge/lib
 
 # Install Node.js dependencies
 COPY package.json package-lock.json* ./
@@ -25,23 +41,18 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 COPY respawn-aliases.json ./
 
-# Copy built bridge JAR
-COPY --from=bridge-build /bridge/target/ts3bridge-1.0.0.jar /app/ts3bridge.jar
-
 # Create directories
-RUN mkdir -p logs /data
+RUN mkdir -p logs /app/bridge/data
 
-# Bridge runs on localhost:8080 inside the container
 ENV TS_MODE=bridge
 ENV BRIDGE_URL=http://localhost:8080
 ENV WEB_PORT=3000
-ENV TS_SERVER=crusaders.expto.com.br
-ENV TS_SERVER_PORT=9987
+ENV TS_SERVER=169.197.140.171
+ENV TS_SERVER_PORT=9989
 ENV TS_NICKNAME=CrusaderBridge
 ENV BRIDGE_PORT=8080
-ENV IDENTITY_FILE=/data/identity.ini
 
 EXPOSE 3000
 
 # Start bridge in background, wait for it, then start dashboard
-CMD ["sh", "-c", "java -jar /app/ts3bridge.jar & sleep 5 && npx tsx src/web-server.ts"]
+CMD ["sh", "-c", "cd /app/bridge && java -cp 'build/classes:lib/*' com.crusaders.bridge.TS3Bridge & sleep 8 && cd /app && npx tsx src/web-server.ts"]
