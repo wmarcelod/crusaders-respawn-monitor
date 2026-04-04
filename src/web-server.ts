@@ -2429,6 +2429,15 @@ async function handleRequest(
       return;
     }
 
+    // Debug: raw channel list from bridge
+    if (url === "/api/debug/channels") {
+      const { getChannelList } = await import("./clientquery");
+      const channels = await getChannelList();
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ total: channels.length, channels }, null, 2));
+      return;
+    }
+
     if (url === "/api/respawns") {
       const { respawns, reservations, activeReservations } = await fetchAllData();
       res.writeHead(200, {
