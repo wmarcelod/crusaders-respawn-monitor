@@ -42,5 +42,6 @@
     "skipLibCheck": true,
 
     "esModuleInterop": true,
-  }
+  },
+  "exclude": ["ts-plugin", "ts3bridge", "node_modules", "dist"]
 }

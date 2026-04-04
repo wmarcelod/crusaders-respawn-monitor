@@ -20,9 +20,10 @@ import {
 } from "./sheets-parser";
 import { findReservationsForRespawnByCode, matchRespawnName } from "./respawn-matcher";
 import { queryRespInfo, RespInfoResult, parseRespInfoMessages } from "./bot-client";
+import { saveRespawnState, saveQueueInfo, getLastKnownState, getCachedQueueFromDB, updateHistory, getDBStats } from "./database";
 import { processSnapshot, getLogStats, getPlayerProfile, getRespawnHistory, getPlayerRespawnHistory, RespawnLogEntry, PlayerProfile } from "./respawn-logger";
 import { fetchCharacter, fetchCharacterFull, fetchCharacters, extractCharNames, shortVocation, TibiaCharacter, TibiaCharacterFull } from "./tibia-api";
-import { startClientTracker, getTrackedClients, getTrackedClient } from "./client-tracker";
+import { startClientTracker, getTrackedClients, getTrackedClient, resolveFullNickname } from "./client-tracker";
 import { getTSConnectionInfo } from "./clientquery";
 import dotenv from "dotenv";
 
@@ -80,7 +81,10 @@ async function processBotQueue(): Promise<void> {
     try {
       const data = await queryRespInfo(item.code, item.remainingMin);
       respInfoCache.set(item.code, { data, nextsWhenFetched: item.nexts });
-      if (data) lastBotContact = new Date();
+      if (data) {
+        lastBotContact = new Date();
+        try { saveQueueInfo(item.code, data); } catch {}
+      }
       item.resolve?.(data);
     } catch {
       item.resolve?.(respInfoCache.get(item.code)?.data || null);
@@ -221,13 +225,48 @@ async function fetchAllData(): Promise<{
   const catalog = await fetchCatalog();
   const reservations = await reservationsPromise;
 
-  if (!channel) {
-    throw new Error("Canal Respawn List nao encontrado. Conecte ao servidor no TS.");
-  }
-
   let respawns: RespawnListData;
   let isNewFetch = false;
-  if (cachedData && now - lastFetch < CACHE_MS) {
+
+  if (!channel) {
+    // Bridge is down - try DB fallback
+    const dbState = getLastKnownState();
+    if (dbState.length > 0) {
+      console.log(`[DB] Bridge offline, using ${dbState.length} cached respawns from DB`);
+      const entries: RespawnEntry[] = dbState.map(r => ({
+        code: r.code,
+        name: r.name,
+        occupiedBy: r.occupied_by || "",
+        occupiedByUid: r.occupied_by_uid || "",
+        elapsedMinutes: r.elapsed_minutes || 0,
+        totalMinutes: r.total_minutes || 0,
+        remainingMinutes: r.remaining_minutes || 0,
+        elapsedFormatted: `${Math.floor((r.elapsed_minutes||0)/60)}:${String((r.elapsed_minutes||0)%60).padStart(2,"0")}`,
+        totalFormatted: `${Math.floor((r.total_minutes||0)/60)}:${String((r.total_minutes||0)%60).padStart(2,"0")}`,
+        remainingFormatted: `${Math.floor((r.remaining_minutes||0)/60)}:${String((r.remaining_minutes||0)%60).padStart(2,"0")}`,
+        progressPercent: r.progress_percent || 0,
+        nexts: r.nexts || 0,
+        color: r.color || "#4ade80",
+        isAlmostDone: (r.remaining_minutes || 0) <= 15 && (r.remaining_minutes || 0) > 0,
+        isEntryWindow: false,
+        status: "active" as const,
+        expectedExit: r.expected_exit || "",
+        expectedExitDate: null,
+      }));
+      respawns = {
+        timestamp: `DB cache (${dbState[0]?.updated_at || "?"})`,
+        fetchedAt: new Date(),
+        totalRespawns: entries.length,
+        entries,
+        freeRespawns: [],
+        catalogTotal: catalog?.total || 0,
+        catalog: catalog || undefined,
+      } as any;
+      cachedData = respawns;
+    } else {
+      throw new Error("Canal Respawn List nao encontrado e sem dados em cache.");
+    }
+  } else if (cachedData && now - lastFetch < CACHE_MS) {
     respawns = cachedData;
   } else {
     const desc = await getChannelDescription(channel.cid);
@@ -237,19 +276,33 @@ async function fetchAllData(): Promise<{
     isNewFetch = true;
   }
 
-  // Log respawn usage on each fresh fetch (non-blocking)
+  // On fresh fetch: log, save to DB, check bot queries
   if (isNewFetch) {
     processSnapshot(respawns.entries).catch(() => {});
-    // Check for nexts changes and trigger background bot queries
     checkAndTriggerBotQueries(respawns.entries);
+
+    // Save to DB (non-blocking)
+    try {
+      saveRespawnState(respawns.entries.map(e => ({
+        code: e.code, name: e.name, occupiedBy: e.occupiedBy, occupiedByUid: e.occupiedByUid,
+        elapsedMinutes: e.elapsedMinutes, totalMinutes: e.totalMinutes, remainingMinutes: e.remainingMinutes,
+        nexts: e.nexts, progressPercent: e.progressPercent, expectedExit: e.expectedExit, color: e.color,
+      })));
+      updateHistory(respawns.entries.map(e => ({
+        code: e.code, name: e.name, occupiedBy: e.occupiedBy, occupiedByUid: e.occupiedByUid,
+        elapsedMinutes: e.elapsedMinutes, nexts: e.nexts,
+      })));
+    } catch (dbErr: any) {
+      console.error("[DB] Save error:", dbErr.message);
+    }
   }
 
   const activeReservations = reservations
     ? getActiveReservations(reservations.all)
     : [];
 
-  // Fetch Tibia character data for current players
-  const playerNames = respawns.entries.map((e) => e.occupiedBy);
+  // Fetch Tibia character data for current players (use resolved names to avoid truncation)
+  const playerNames = respawns.entries.map((e) => resolveFullNickname(e.occupiedBy, e.occupiedByUid));
   const playerData = await fetchPlayerDataCached(playerNames);
   return { respawns, reservations, activeReservations, playerData };
 }
@@ -292,17 +345,20 @@ function renderHTML(
         ? "almost-row"
         : "";
 
+      // Resolve full player name (fixes truncated names like "Marlito Sorc..." → "Marlito Sorcerer")
+      const fullName = resolveFullNickname(e.occupiedBy, e.occupiedByUid);
+
       // Look up Tibia character data for this player
       // Prefer client tracker data (tracks ALL clients), fall back to playerData map
       let vocClass = "?";
       let level = 0;
-      let playerHtml = `<a href="/player/${encodeURIComponent(e.occupiedBy)}" class="player-link"><span class="player-name">${escapeHtml(e.occupiedBy)}</span></a>`;
+      let playerHtml = `<a href="/player/${encodeURIComponent(fullName)}" class="player-link"><span class="player-name">${escapeHtml(fullName)}</span></a>`;
 
       let tc: TibiaCharacter | null = null;
       let resolvedCharName: string | null = null;
 
       // Try client tracker first (has data for ALL connected TS clients)
-      const tracked = getTrackedClient(e.occupiedBy);
+      const tracked = getTrackedClient(fullName);
       if (tracked?.tibiaData) {
         tc = tracked.tibiaData;
         resolvedCharName = tracked.charName;
@@ -310,7 +366,7 @@ function renderHTML(
 
       // Fall back to playerData map if tracker didn't have it
       if (!tc && playerData) {
-        const charNames = extractCharNames(e.occupiedBy);
+        const charNames = extractCharNames(fullName);
         for (const cn of charNames) {
           const found = playerData.get(cn);
           if (found) {
@@ -324,7 +380,7 @@ function renderHTML(
       if (tc && resolvedCharName) {
         vocClass = shortVocation(tc.vocation).toLowerCase();
         level = tc.level;
-        playerHtml = `<a href="/player/${encodeURIComponent(e.occupiedBy)}" class="player-link"><span class="player-name">${escapeHtml(e.occupiedBy)}</span></a>`
+        playerHtml = `<a href="/player/${encodeURIComponent(fullName)}" class="player-link"><span class="player-name">${escapeHtml(fullName)}</span></a>`
           + `<div class="player-info">`
           + `<span class="voc-badge ${vocClass}">${shortVocation(tc.vocation)}</span>`
           + `<span class="player-level">Lv${tc.level}</span>`
@@ -354,7 +410,7 @@ function renderHTML(
       }
 
       return `
-      <tr class="${rowClass}" data-code="${escapeHtml(e.code)}" data-respawn="${escapeHtml(e.name)}" data-player="${escapeHtml(e.occupiedBy)}" data-voc="${vocClass}" data-level="${level}" data-remaining="${e.remainingMinutes}" data-exit="${freeAt}">
+      <tr class="${rowClass}" data-code="${escapeHtml(e.code)}" data-respawn="${escapeHtml(e.name)}" data-player="${escapeHtml(fullName)}" data-voc="${vocClass}" data-level="${level}" data-remaining="${e.remainingMinutes}" data-exit="${freeAt}">
         <td class="code"><a href="/respawn/${encodeURIComponent(e.code)}" class="respawn-link">${escapeHtml(e.code)}</a></td>
         <td class="respawn-name"><a href="/respawn/${encodeURIComponent(e.code)}" class="respawn-link">${escapeHtml(e.name)}</a></td>
         <td class="player-cell">${playerHtml}</td>
@@ -1964,7 +2020,7 @@ function renderRespawnDetailHTML(
 
     .top-player-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #1a1c2e; }
     .top-player-row:last-child { border-bottom: none; }
-    .top-player-name { flex: 1; color: #d4d4d8; font-size: 0.85em; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .top-player-name { flex: 1; color: #d4d4d8; font-size: 0.85em; font-weight: 500; word-break: break-word; }
     .top-player-level { color: #71717a; font-size: 0.75em; font-family: 'JetBrains Mono', monospace; }
     .top-player-count { color: #818cf8; font-size: 0.8em; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
 
@@ -2793,6 +2849,7 @@ async function handleRequest(
             const nexts = lastKnownNexts[code] ?? 0;
             respInfoCache.set(code, { data: resultData, nextsWhenFetched: nexts });
             lastBotContact = new Date();
+            try { saveQueueInfo(code, resultData); } catch {}
             console.log(`[Plugin] Received respinfo for ${code} from plugin`);
           }
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -2813,6 +2870,14 @@ async function handleRequest(
         lastSeen: pluginLastSeen ? new Date(pluginLastSeen).toISOString() : null,
         pendingQueries: pendingPluginQueries.size,
       }));
+      return;
+    }
+
+    // DB stats: GET /api/db/stats
+    if (url === "/api/db/stats") {
+      const stats = getDBStats();
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify(stats));
       return;
     }
 
