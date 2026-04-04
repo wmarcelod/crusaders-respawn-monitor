@@ -100,7 +100,7 @@ function triggerBotQuery(code: string, nexts: number, remainingMin?: number): vo
   processBotQueue();
 }
 
-const REQUERY_INTERVAL_MS = 300_000; // Re-query active queues every 5 minutes
+const REQUERY_INTERVAL_MS = parseInt(process.env.REQUERY_INTERVAL_MIN || "10") * 60_000; // Re-query interval (default 10min, configurable via REQUERY_INTERVAL_MIN)
 const lastQueryTime: Record<string, number> = {};
 
 /** Check which respawns need bot queries and enqueue them.
