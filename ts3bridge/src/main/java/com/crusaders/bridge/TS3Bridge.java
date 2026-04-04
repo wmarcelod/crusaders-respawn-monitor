@@ -273,13 +273,24 @@ public class TS3Bridge {
     // ========== MOVE TO AFK ==========
 
     /**
-     * Find the AFK channel by searching channel names (case-insensitive).
+     * Find the AFK/hide channel. Checks AFK_CHANNEL_ID env first, then searches by name.
      * Returns -1 if not found.
      */
     private static int findAfkChannelId() {
+        // 1. Check explicit env var
+        String envCid = System.getenv("AFK_CHANNEL_ID");
+        if (envCid != null && !envCid.isEmpty()) {
+            try {
+                return Integer.parseInt(envCid.trim());
+            } catch (NumberFormatException e) {
+                log("[Bridge] Invalid AFK_CHANNEL_ID: " + envCid);
+            }
+        }
+
+        // 2. Search by name
         for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : channelCache.entrySet()) {
             String name = safe(entry.getValue().get("channel_name")).toLowerCase();
-            if (name.contains("afk") || name.contains("away")) {
+            if (name.contains("afk") || name.contains("away") || name.contains("deep web")) {
                 return entry.getKey();
             }
         }
