@@ -309,19 +309,14 @@ function renderHTML(
       // Calculate "Livre as" - when the respawn will actually be free
       const botData = getCachedRespInfo(e.code);
       let freeAt: string;
-      let freeAtEstimated = false;
+      let hasBotQueue = false;
       if (e.nexts > 0 && botData && botData.nexts && botData.nexts.length > 0) {
-        // Precise: recalculate using current remaining + each person's actual claim time
+        // Recalculate using current remaining + each person's actual claim time from bot
         const nextsTotal = botData.nexts.reduce((sum, n) => sum + n.claimMinutes, 0);
         const totalQueueMin = Math.max(0, e.remainingMinutes) + nextsTotal;
         const freeDate = new Date(Date.now() + totalQueueMin * 60 * 1000);
         freeAt = `${String(freeDate.getHours()).padStart(2, "0")}:${String(freeDate.getMinutes()).padStart(2, "0")}`;
-      } else if (e.nexts > 0) {
-        // Estimate: remaining + nexts * same claim time as current
-        const estimatedMin = Math.max(0, e.remainingMinutes) + (e.nexts * e.totalMinutes);
-        const freeDate = new Date(Date.now() + estimatedMin * 60 * 1000);
-        freeAt = `~${String(freeDate.getHours()).padStart(2, "0")}:${String(freeDate.getMinutes()).padStart(2, "0")}`;
-        freeAtEstimated = true;
+        hasBotQueue = true;
       } else {
         freeAt = e.expectedExit;
       }
@@ -351,7 +346,7 @@ function renderHTML(
           ${e.isEntryWindow ? "TROCANDO" : timeUp ? `SAINDO (+${e.elapsedMinutes - e.totalMinutes}min)` : e.remainingFormatted}
         </td>
         <td class="exit-time ${timeUp ? "entry-window-text" : e.isAlmostDone ? "almost-text" : ""}">
-          ${freeAt}${e.nexts > 0 ? ` <span class="queue-indicator">${freeAtEstimated ? "~est" : "+fila"}</span>` : ""}
+          ${hasBotQueue ? freeAt + ' <span class="queue-indicator">+fila</span>' : e.nexts > 0 ? '<span class="queue-indicator">+' + e.nexts + ' fila</span>' : freeAt}
         </td>
         <td class="nexts">${filaHtml}</td>
         <td class="status">${statusBadge(e)}</td>
