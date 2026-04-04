@@ -2430,13 +2430,14 @@ async function handleRequest(
       return;
     }
 
-    // Debug: proxy bridge's raw cache dump
-    if (url === "/api/debug/bridge-cache") {
+    // Debug: proxy bridge endpoints
+    if (url === "/api/debug/bridge-logs" || url === "/api/debug/bridge-cache") {
       const corsH = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
       try {
         const bridgeUrl = process.env.BRIDGE_URL || "http://localhost:8080";
+        const bridgePath = url === "/api/debug/bridge-logs" ? "/api/debug/logs" : "/api/debug/cache";
         const raw = await new Promise<string>((resolve, reject) => {
-          http.get(`${bridgeUrl}/api/debug/cache`, (resp) => {
+          http.get(`${bridgeUrl}${bridgePath}`, (resp) => {
             let data = "";
             resp.on("data", (chunk: Buffer) => data += chunk);
             resp.on("end", () => resolve(data));
