@@ -25,7 +25,7 @@ import {
 
 dotenv.config();
 
-const BOT_UID = "JtyuT0YIadDhysblVvprGK/0Ces=";
+const BOT_UID = process.env.BOT_UID || "JtyuT0YIadDhysblVvprGK/0Ces=";
 const BOT_UID_FILE = path.join(__dirname, "..", "bot-uid.json");
 
 // --- Clid persistence ---
