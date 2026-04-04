@@ -6,6 +6,9 @@ import com.github.manevolent.ts3j.identity.LocalIdentity;
 import com.github.manevolent.ts3j.event.*;
 import com.github.manevolent.ts3j.api.Channel;
 import com.github.manevolent.ts3j.api.Client;
+import com.github.manevolent.ts3j.command.SingleCommand;
+import com.github.manevolent.ts3j.command.parameter.CommandSingleParameter;
+import com.github.manevolent.ts3j.protocol.ProtocolRole;
 import com.google.gson.Gson;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpExchange;
@@ -142,8 +145,67 @@ public class TS3Bridge {
     }
 
     /**
+     * Fetch a single channel's description using raw command.
+     * Tries "channelvariable" first (TS3 client protocol), then "channelinfo" (ServerQuery).
+     */
+    private static void fetchChannelDescription(int channelId) {
+        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
+
+        // Try channelinfo (works on some servers, returns full channel data including description)
+        try {
+            Channel info = tsClient.getChannelInfo(channelId);
+            if (info != null) {
+                Map<String, String> data = info.getMap();
+                log("[Desc] channelinfo cid=" + channelId + " keys=" + data.keySet());
+                if (data.containsKey("channel_description")) {
+                    mergeChannelEvent("channelinfo", channelId, data);
+                    return;
+                }
+            }
+        } catch (Exception ex) {
+            log("[Desc] channelinfo cid=" + channelId + " failed: " + ex.getMessage());
+        }
+
+        // Try raw "channelvariable" command (TS3 client protocol for requesting specific properties)
+        try {
+            SingleCommand cmd = new SingleCommand(
+                "channelvariable",
+                ProtocolRole.CLIENT,
+                new CommandSingleParameter("cid", Integer.toString(channelId)),
+                new CommandSingleParameter("channel_description", "")
+            );
+            Iterable<SingleCommand> result = tsClient.executeCommand(cmd).get();
+            for (SingleCommand sc : result) {
+                Map<String, String> data = sc.toMap();
+                log("[Desc] channelvariable cid=" + channelId + " keys=" + data.keySet() + " vals=" + data);
+                mergeChannelEvent("channelvariable", channelId, data);
+            }
+        } catch (Exception ex) {
+            log("[Desc] channelvariable cid=" + channelId + " failed: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Fetch descriptions for all channels in the cache.
+     */
+    private static void fetchAllDescriptions() {
+        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
+        log("[Bridge] Fetching descriptions for " + channelCache.size() + " channels...");
+        for (int cid : channelCache.keySet()) {
+            ConcurrentHashMap<String, String> ch = channelCache.get(cid);
+            // Only fetch if we don't already have a description
+            String existingDesc = ch != null ? ch.get("channel_description") : null;
+            if (existingDesc == null || existingDesc.isEmpty() || "null".equals(existingDesc)) {
+                fetchChannelDescription(cid);
+            }
+        }
+    }
+
+    /**
      * Sync channel list from the server using listChannels().
-     * This works on the Crusaders server and populates the cache.
+     * Note: listChannels() may not work reliably because the "channellist" named
+     * processor intercepts the response. The initial channel data comes from
+     * onChannelList events during connection.
      */
     private static void syncChannelList() {
         if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
@@ -153,10 +215,12 @@ public class TS3Bridge {
                 count++;
                 mergeChannelEvent("syncChannelList", channel.getId(), channel.getMap());
             }
-            System.out.println("[Bridge] Synced " + count + " channels into cache");
+            log("[Bridge] Synced " + count + " channels into cache");
         } catch (Exception ex) {
-            System.out.println("[Bridge] syncChannelList failed: " + ex.getMessage());
+            log("[Bridge] syncChannelList failed: " + ex.getMessage());
         }
+        // After syncing channel list, fetch descriptions
+        fetchAllDescriptions();
     }
 
     /**
@@ -199,12 +263,14 @@ public class TS3Bridge {
             client.addListener(new TS3Listener() {
                 @Override
                 public void onConnected(ConnectedEvent e) {
-                    System.out.println("[Bridge] onConnected event received");
+                    log("[Bridge] onConnected event received");
                     // Schedule initial sync after connection stabilizes
                     scheduler.schedule(() -> {
                         syncChannelList();
                         syncClientList();
                     }, 2, TimeUnit.SECONDS);
+                    // Fetch descriptions after channel list is loaded (give extra time)
+                    scheduler.schedule(() -> fetchAllDescriptions(), 5, TimeUnit.SECONDS);
                 }
 
                 @Override
@@ -220,6 +286,8 @@ public class TS3Bridge {
                 @Override
                 public void onChannelDescriptionChanged(ChannelDescriptionEditedEvent e) {
                     mergeChannelEvent("onChannelDescChanged", e.getChannelId(), e.getMap());
+                    // Try to fetch the actual description content
+                    scheduler.schedule(() -> fetchChannelDescription(e.getChannelId()), 500, TimeUnit.MILLISECONDS);
                 }
 
                 @Override
