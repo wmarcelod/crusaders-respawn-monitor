@@ -19,7 +19,7 @@ import {
   ReservationData,
 } from "./sheets-parser";
 import { findReservationsForRespawnByCode, matchRespawnName } from "./respawn-matcher";
-import { queryRespInfo, RespInfoResult } from "./bot-client";
+import { queryRespInfo, RespInfoResult, parseRespInfoMessages } from "./bot-client";
 import { processSnapshot, getLogStats, getPlayerProfile, getRespawnHistory, getPlayerRespawnHistory, RespawnLogEntry, PlayerProfile } from "./respawn-logger";
 import { fetchCharacter, fetchCharacterFull, fetchCharacters, extractCharNames, shortVocation, TibiaCharacter, TibiaCharacterFull } from "./tibia-api";
 import { startClientTracker, getTrackedClients, getTrackedClient } from "./client-tracker";
@@ -2738,12 +2738,31 @@ async function handleRequest(
       req.on("data", (chunk: Buffer) => body += chunk.toString());
       req.on("end", () => {
         try {
-          const { code, data } = JSON.parse(body);
-          if (code && data) {
+          const payload = JSON.parse(body);
+          const code = payload.code;
+          if (!code) throw new Error("Missing code");
+
+          let resultData: RespInfoResult | null = null;
+
+          if (payload.data) {
+            // Pre-parsed data (from Node.js plugin)
+            resultData = payload.data;
+          } else if (payload.rawMessages && Array.isArray(payload.rawMessages)) {
+            // Raw messages from native TS3 plugin - parse server-side
+            const remainingMin = cachedData?.entries.find(e => e.code === code)?.remainingMinutes ?? 0;
+            const parsed = parseRespInfoMessages(payload.rawMessages);
+            const nextsTotal = parsed.nexts.reduce((sum: number, n: any) => sum + n.claimMinutes, 0);
+            const totalQueueMinutes = Math.max(0, remainingMin) + nextsTotal;
+            const freeDate = new Date(Date.now() + totalQueueMinutes * 60 * 1000);
+            const freeAt = `${String(freeDate.getHours()).padStart(2, "0")}:${String(freeDate.getMinutes()).padStart(2, "0")}`;
+            resultData = { code, ...parsed, totalQueueMinutes, freeAt };
+          }
+
+          if (resultData) {
             const nexts = lastKnownNexts[code] ?? 0;
-            respInfoCache.set(code, { data, nextsWhenFetched: nexts });
+            respInfoCache.set(code, { data: resultData, nextsWhenFetched: nexts });
             lastBotContact = new Date();
-            console.log(`[Plugin] Received respinfo for ${code} from local agent`);
+            console.log(`[Plugin] Received respinfo for ${code} from plugin`);
           }
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
