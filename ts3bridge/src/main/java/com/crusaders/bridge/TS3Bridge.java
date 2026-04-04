@@ -290,7 +290,7 @@ public class TS3Bridge {
         // 2. Search by name
         for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : channelCache.entrySet()) {
             String name = safe(entry.getValue().get("channel_name")).toLowerCase();
-            if (name.contains("afk") || name.contains("away") || name.contains("deep web")) {
+            if (name.contains("afk") || name.contains("away")) {
                 return entry.getKey();
             }
         }
