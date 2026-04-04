@@ -25,6 +25,7 @@ import { processSnapshot, getLogStats, getPlayerProfile, getRespawnHistory, getP
 import { fetchCharacter, fetchCharacterFull, fetchCharacters, extractCharNames, shortVocation, TibiaCharacter, TibiaCharacterFull } from "./tibia-api";
 import { startClientTracker, getTrackedClients, getTrackedClient, resolveFullNickname } from "./client-tracker";
 import { getTSConnectionInfo } from "./clientquery";
+import { getTopKilled, getCreatureEconomy, getMarketOverview, getItemHistory, searchItems, fetchKillStatistics } from "./kill-stats";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -1120,6 +1121,7 @@ function renderHTML(
         <div class="nav-links">
           <a href="/" class="nav-link current">Dashboard</a>
           <a href="/agenda" class="nav-link">Agenda</a>
+          <a href="/economy" class="nav-link">Economia</a>
         </div>
       </div>
       <div class="header-actions">
@@ -2754,6 +2756,311 @@ function renderPlayerDetailHTML(
 </html>`;
 }
 
+function renderEconomyHTML(): string {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crusaders - Economia ${WORLD}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #0b0d17; color: #d4d4d8; min-height: 100vh; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid #1e2030; margin-bottom: 24px; }
+    h1 { font-size: 1.5em; font-weight: 700; color: #f4f4f5; }
+    h1 span { color: #818cf8; }
+    .nav-links { display: flex; gap: 12px; margin-top: 8px; }
+    .nav-link { color: #818cf8; text-decoration: none; font-size: 0.85em; padding: 4px 12px; border: 1px solid #2e3150; border-radius: 8px; background: #1e2030; }
+    .nav-link:hover { background: #2e3150; }
+    .nav-link.current { background: #312e81; border-color: #818cf8; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 24px; }
+    .tab { background: #1e2030; color: #818cf8; border: 1px solid #2e3150; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 0.9em; font-weight: 500; }
+    .tab:hover { background: #2e3150; }
+    .tab.active { background: #312e81; border-color: #818cf8; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    table { width: 100%; border-collapse: collapse; background: #111322; border-radius: 12px; overflow: hidden; border: 1px solid #1e2030; }
+    thead th { background: #0f1122; color: #a1a1aa; font-weight: 600; font-size: 0.72em; text-transform: uppercase; padding: 12px 16px; text-align: left; cursor: pointer; }
+    thead th:hover { color: #818cf8; }
+    tbody td { padding: 10px 16px; border-top: 1px solid #1e2030; font-size: 0.85em; }
+    tbody tr:hover { background: #161938; }
+    .gold { color: #fbbf24; font-weight: 600; }
+    .green { color: #34d399; }
+    .red { color: #f87171; }
+    .muted { color: #52525b; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.7em; font-weight: 600; }
+    .badge.market { background: #1e3a5f; color: #7dd3fc; }
+    .badge.npc { background: #3a351e; color: #fde68a; }
+    .search-box { background: #111322; color: #d4d4d8; border: 1px solid #2e3150; padding: 10px 16px; border-radius: 8px; width: 100%; max-width: 400px; font-family: inherit; margin-bottom: 16px; }
+    .search-box:focus { outline: none; border-color: #818cf8; }
+    .section-title { color: #a1a1aa; font-size: 1.1em; font-weight: 600; margin: 28px 0 12px; }
+    .creature-card { background: #111322; border: 1px solid #1e2030; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    .creature-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .creature-name { font-size: 1.2em; font-weight: 700; color: #f4f4f5; }
+    .creature-stats { display: flex; gap: 16px; }
+    .creature-stat { text-align: center; }
+    .creature-stat .label { font-size: 0.7em; color: #71717a; }
+    .creature-stat .value { font-size: 1.1em; font-weight: 700; }
+    .loot-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .loot-item { background: #1e2030; padding: 6px 12px; border-radius: 6px; font-size: 0.8em; display: flex; gap: 8px; align-items: center; }
+    .loot-price { color: #fbbf24; font-weight: 600; }
+    #loading { text-align: center; padding: 40px; color: #71717a; }
+    .clickable { cursor: pointer; }
+    .clickable:hover { color: #818cf8; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1><span>Crusaders</span> Economia - ${escapeHtml(WORLD)}</h1>
+        <div class="nav-links">
+          <a href="/" class="nav-link">Dashboard</a>
+          <a href="/agenda" class="nav-link">Agenda</a>
+          <a href="/economy" class="nav-link current">Economia</a>
+        </div>
+      </div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab active" onclick="showTab('kills')">Kill Statistics</button>
+      <button class="tab" onclick="showTab('market')">Market</button>
+      <button class="tab" onclick="showTab('creature')">Criatura</button>
+    </div>
+
+    <!-- Kill Statistics Tab -->
+    <div class="panel active" id="panel-kills">
+      <input type="text" class="search-box" id="killSearch" placeholder="Buscar criatura..." oninput="filterKills()">
+      <div id="killsLoading">Carregando kill statistics...</div>
+      <table id="killsTable" style="display:none">
+        <thead>
+          <tr>
+            <th onclick="sortKills('race')">Criatura</th>
+            <th onclick="sortKills('killsDay')">Kills/Dia</th>
+            <th onclick="sortKills('killsWeek')">Kills/Semana</th>
+            <th onclick="sortKills('playersKilledDay')">Players Mortos/Dia</th>
+            <th onclick="sortKills('playersKilledWeek')">Players Mortos/Semana</th>
+            <th>Detalhes</th>
+          </tr>
+        </thead>
+        <tbody id="killsBody"></tbody>
+      </table>
+    </div>
+
+    <!-- Market Tab -->
+    <div class="panel" id="panel-market">
+      <input type="text" class="search-box" id="marketSearch" placeholder="Buscar item..." oninput="filterMarket()">
+      <div id="marketLoading">Carregando dados do mercado...</div>
+      <table id="marketTable" style="display:none">
+        <thead>
+          <tr>
+            <th onclick="sortMarket('name')">Item</th>
+            <th onclick="sortMarket('category')">Categoria</th>
+            <th onclick="sortMarket('buyOffer')">Compra</th>
+            <th onclick="sortMarket('sellOffer')">Venda</th>
+            <th onclick="sortMarket('spread')">Spread</th>
+            <th onclick="sortMarket('monthVolume')">Volume/Mes</th>
+            <th onclick="sortMarket('dayVolume')">Volume/Dia</th>
+            <th onclick="sortMarket('activeTraders')">Traders</th>
+          </tr>
+        </thead>
+        <tbody id="marketBody"></tbody>
+      </table>
+    </div>
+
+    <!-- Creature Detail Tab -->
+    <div class="panel" id="panel-creature">
+      <input type="text" class="search-box" id="creatureSearch" placeholder="Nome da criatura (ex: demon, dragon lord)..." onkeydown="if(event.key==='Enter')loadCreature(this.value)">
+      <button class="tab" onclick="loadCreature(document.getElementById('creatureSearch').value)" style="margin-bottom:16px">Buscar</button>
+      <div id="creatureDetail"></div>
+    </div>
+  </div>
+
+  <script>
+    var killsData = [];
+    var marketData = [];
+    var killSortKey = 'killsWeek';
+    var killSortDir = -1;
+    var marketSortKey = 'monthVolume';
+    var marketSortDir = -1;
+
+    function showTab(name) {
+      document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('active'); });
+      document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+      document.getElementById('panel-' + name).classList.add('active');
+      event.target.classList.add('active');
+    }
+
+    function fmt(n) {
+      if (n === null || n === undefined) return '-';
+      return n.toLocaleString('pt-BR');
+    }
+
+    function fmtGold(n) {
+      if (!n) return '-';
+      if (n >= 1000000) return (n/1000000).toFixed(1) + 'M';
+      if (n >= 1000) return (n/1000).toFixed(1) + 'k';
+      return n.toLocaleString('pt-BR');
+    }
+
+    function esc(s) {
+      if (!s) return '';
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // --- Kills ---
+    async function loadKills() {
+      try {
+        var res = await fetch('/api/kills?limit=200');
+        killsData = await res.json();
+        renderKills();
+        document.getElementById('killsLoading').style.display = 'none';
+        document.getElementById('killsTable').style.display = '';
+      } catch(e) {
+        document.getElementById('killsLoading').textContent = 'Erro: ' + e.message;
+      }
+    }
+
+    function sortKills(key) {
+      if (killSortKey === key) killSortDir *= -1;
+      else { killSortKey = key; killSortDir = -1; }
+      renderKills();
+    }
+
+    function renderKills() {
+      var q = (document.getElementById('killSearch').value || '').toLowerCase();
+      var data = killsData.filter(function(k) { return !q || k.race.toLowerCase().includes(q); });
+      data.sort(function(a, b) { return killSortDir * ((a[killSortKey] > b[killSortKey]) ? 1 : (a[killSortKey] < b[killSortKey]) ? -1 : 0); });
+
+      var html = '';
+      for (var i = 0; i < data.length; i++) {
+        var k = data[i];
+        html += '<tr>';
+        html += '<td>' + esc(k.race) + '</td>';
+        html += '<td class="gold">' + fmt(k.killsDay) + '</td>';
+        html += '<td class="gold">' + fmt(k.killsWeek) + '</td>';
+        html += '<td class="' + (k.playersKilledDay > 0 ? 'red' : 'muted') + '">' + fmt(k.playersKilledDay) + '</td>';
+        html += '<td class="' + (k.playersKilledWeek > 0 ? 'red' : 'muted') + '">' + fmt(k.playersKilledWeek) + '</td>';
+        html += '<td><span class="clickable" onclick="loadCreatureFromKills(\\'' + esc(k.race).replace(/'/g, "\\\\'") + '\\')">Ver loot</span></td>';
+        html += '</tr>';
+      }
+      document.getElementById('killsBody').innerHTML = html;
+    }
+
+    function filterKills() { renderKills(); }
+
+    function loadCreatureFromKills(race) {
+      document.getElementById('creatureSearch').value = race;
+      showTabByName('creature');
+      loadCreature(race);
+    }
+
+    function showTabByName(name) {
+      document.querySelectorAll('.panel').forEach(function(p) { p.classList.remove('active'); });
+      document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+      document.getElementById('panel-' + name).classList.add('active');
+      var tabs = document.querySelectorAll('.tab');
+      var idx = name === 'kills' ? 0 : name === 'market' ? 1 : 2;
+      if (tabs[idx]) tabs[idx].classList.add('active');
+    }
+
+    // --- Market ---
+    async function loadMarket() {
+      try {
+        var res = await fetch('/api/market?limit=100');
+        marketData = await res.json();
+        renderMarket();
+        document.getElementById('marketLoading').style.display = 'none';
+        document.getElementById('marketTable').style.display = '';
+      } catch(e) {
+        document.getElementById('marketLoading').textContent = 'Erro: ' + e.message;
+      }
+    }
+
+    function sortMarket(key) {
+      if (marketSortKey === key) marketSortDir *= -1;
+      else { marketSortKey = key; marketSortDir = -1; }
+      renderMarket();
+    }
+
+    function renderMarket() {
+      var q = (document.getElementById('marketSearch').value || '').toLowerCase();
+      var data = marketData.filter(function(m) { return !q || m.name.toLowerCase().includes(q); });
+      data.sort(function(a, b) { return marketSortDir * ((a[marketSortKey] > b[marketSortKey]) ? 1 : (a[marketSortKey] < b[marketSortKey]) ? -1 : 0); });
+
+      var html = '';
+      for (var i = 0; i < data.length; i++) {
+        var m = data[i];
+        html += '<tr>';
+        html += '<td>' + esc(m.name) + '</td>';
+        html += '<td class="muted">' + esc(m.category) + '</td>';
+        html += '<td class="green">' + fmtGold(m.buyOffer) + '</td>';
+        html += '<td class="gold">' + fmtGold(m.sellOffer) + '</td>';
+        html += '<td class="' + (m.spread > 0 ? 'green' : 'red') + '">' + fmtGold(m.spread) + ' (' + m.spreadPercent + '%)</td>';
+        html += '<td>' + fmt(m.monthVolume) + '</td>';
+        html += '<td>' + fmt(m.dayVolume) + '</td>';
+        html += '<td>' + fmt(m.activeTraders) + '</td>';
+        html += '</tr>';
+      }
+      document.getElementById('marketBody').innerHTML = html;
+    }
+
+    function filterMarket() { renderMarket(); }
+
+    // --- Creature Detail ---
+    async function loadCreature(race) {
+      if (!race) return;
+      var detail = document.getElementById('creatureDetail');
+      detail.innerHTML = '<div id="loading">Carregando ' + esc(race) + '...</div>';
+
+      try {
+        var res = await fetch('/api/creature/' + encodeURIComponent(race));
+        var data = await res.json();
+
+        if (!data || data.error) {
+          detail.innerHTML = '<div class="creature-card"><p>Criatura nao encontrada: ' + esc(race) + '</p></div>';
+          return;
+        }
+
+        var html = '<div class="creature-card">';
+        html += '<div class="creature-header">';
+        html += '<span class="creature-name">' + esc(data.name) + '</span>';
+        html += '<div class="creature-stats">';
+        html += '<div class="creature-stat"><div class="label">HP</div><div class="value red">' + fmt(data.hitpoints) + '</div></div>';
+        html += '<div class="creature-stat"><div class="label">XP</div><div class="value green">' + fmt(data.experience) + '</div></div>';
+        html += '<div class="creature-stat"><div class="label">Kills/Dia</div><div class="value gold">' + fmt(data.killsDay) + '</div></div>';
+        html += '<div class="creature-stat"><div class="label">Kills/Semana</div><div class="value gold">' + fmt(data.killsWeek) + '</div></div>';
+        html += '<div class="creature-stat"><div class="label">~Gold/Kill</div><div class="value gold">' + fmtGold(data.estimatedGoldPerKill) + '</div></div>';
+        html += '<div class="creature-stat"><div class="label">~Gold/Dia</div><div class="value gold">' + fmtGold(data.estimatedDailyGold) + '</div></div>';
+        html += '</div></div>';
+
+        html += '<div class="section-title">Loot (' + data.lootItems.length + ' itens)</div>';
+        html += '<div class="loot-grid">';
+        for (var i = 0; i < data.lootItems.length; i++) {
+          var item = data.lootItems[i];
+          var priceHtml = item.marketPrice > 0 ? '<span class="loot-price">' + fmtGold(item.marketPrice) + '</span><span class="badge ' + item.source + '">' + item.source.toUpperCase() + '</span>' : '<span class="muted">?</span>';
+          html += '<div class="loot-item"><span>' + esc(item.name) + '</span>' + priceHtml + '</div>';
+        }
+        html += '</div></div>';
+
+        detail.innerHTML = html;
+      } catch(e) {
+        detail.innerHTML = '<div class="creature-card"><p class="red">Erro: ' + esc(e.message) + '</p></div>';
+      }
+    }
+
+    // Init
+    loadKills();
+    loadMarket();
+  </script>
+</body>
+</html>`;
+}
+
+const WORLD = process.env.TIBIA_WORLD || "Celebra";
+
 function renderAgendaHTML(): string {
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -2818,6 +3125,7 @@ function renderAgendaHTML(): string {
         <div class="nav-links">
           <a href="/" class="nav-link">Dashboard</a>
           <a href="/agenda" class="nav-link current">Agenda</a>
+          <a href="/economy" class="nav-link">Economia</a>
         </div>
       </div>
     </header>
@@ -3273,6 +3581,83 @@ async function handleRequest(
     if (url === "/api/chat/stats") {
       res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
       res.end(JSON.stringify(getChatStats()));
+      return;
+    }
+
+    // --- Kill Stats & Market API ---
+    if (url === "/api/kills" || url.startsWith("/api/kills?")) {
+      try {
+        const urlObj = new URL(url, "http://localhost");
+        const limit = parseInt(urlObj.searchParams.get("limit") || "50");
+        const data = await getTopKilled(limit);
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify(data));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    if (url.startsWith("/api/creature/")) {
+      try {
+        const race = decodeURIComponent(url.replace("/api/creature/", "").replace(/\?.*/, ""));
+        const data = await getCreatureEconomy(race);
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify(data));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    if (url === "/api/market" || url.startsWith("/api/market?")) {
+      try {
+        const urlObj = new URL(url, "http://localhost");
+        const limit = parseInt(urlObj.searchParams.get("limit") || "50");
+        const data = await getMarketOverview(limit);
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify(data));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    if (url.startsWith("/api/market/item/")) {
+      try {
+        const itemId = parseInt(url.replace("/api/market/item/", "").replace(/\?.*/, ""));
+        const history = await getItemHistory(itemId);
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify(history));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    if (url.startsWith("/api/items/search")) {
+      try {
+        const urlObj = new URL(url, "http://localhost");
+        const q = urlObj.searchParams.get("q") || "";
+        const data = await searchItems(q);
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify(data));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // Economy page: /economy
+    if (url === "/economy" || url.startsWith("/economy?")) {
+      const html = renderEconomyHTML();
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
       return;
     }
 
