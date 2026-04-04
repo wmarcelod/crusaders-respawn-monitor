@@ -88,7 +88,7 @@ public class TS3Bridge {
 
         // Load or create TS3 identity
         LocalIdentity identity = loadIdentity();
-        identityUid = identity.getUid().toString();
+        identityUid = identity.getUid().toBase64();
         System.out.println("  UID:       " + identityUid);
         System.out.println("============================================");
 
