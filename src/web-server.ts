@@ -45,6 +45,16 @@ const respInfoCache = new Map<string, { data: RespInfoResult | null; nextsWhenFe
 let lastKnownNexts: Record<string, number> = {};
 let lastBotContact: Date | null = null;
 
+// --- Plugin (local agent) state ---
+const PLUGIN_SECRET = process.env.PLUGIN_SECRET || "crusaders2026";
+const PLUGIN_TIMEOUT = 30_000; // 30s - consider plugin offline after this
+let pluginLastSeen = 0;
+const pendingPluginQueries: Map<string, { nexts: number; remainingMin: number }> = new Map();
+
+function isPluginConnected(): boolean {
+  return (Date.now() - pluginLastSeen) < PLUGIN_TIMEOUT;
+}
+
 /** Get cached respinfo for a code (used for inline display). Does not trigger fetch. */
 function getCachedRespInfo(code: string): RespInfoResult | null {
   return respInfoCache.get(code)?.data || null;
@@ -90,13 +100,21 @@ function triggerBotQuery(code: string, nexts: number, remainingMin?: number): vo
   processBotQueue();
 }
 
-/** Check which respawns had nexts changes and enqueue serial bot queries */
+/** Check which respawns had nexts changes and enqueue bot queries.
+ *  If plugin is connected, add to pendingPluginQueries (plugin will handle it).
+ *  Otherwise, use bridge fallback (triggerBotQuery). */
 function checkAndTriggerBotQueries(entries: RespawnEntry[]): void {
   for (const e of entries) {
     if (e.nexts > 0) {
       const prev = lastKnownNexts[e.code] ?? -1;
       if (prev !== e.nexts) {
-        triggerBotQuery(e.code, e.nexts, e.remainingMinutes);
+        if (isPluginConnected()) {
+          // Plugin mode: queue for local agent to pick up
+          pendingPluginQueries.set(e.code, { nexts: e.nexts, remainingMin: e.remainingMinutes });
+        } else {
+          // Fallback: use bridge temp connection
+          triggerBotQuery(e.code, e.nexts, e.remainingMinutes);
+        }
       }
     }
     lastKnownNexts[e.code] = e.nexts;
@@ -989,6 +1007,7 @@ function renderHTML(
           Atualizado: <span id="lastUpdate">${data.fetchedAt.toLocaleTimeString("pt-BR")}</span>
           <div class="bot-indicator" id="botStatus">
             <span id="botText">CrusaderBot: ${lastBotContact ? "ultimo contato " + lastBotContact.toLocaleTimeString("pt-BR") : "sem contato"}</span>
+            <span style="margin-left:8px;font-size:0.75rem;opacity:0.7">${isPluginConnected() ? "🟢 Plugin" : "🔵 Bridge"}</span>
           </div>
         </div>
       </div>
@@ -2677,6 +2696,73 @@ async function handleRequest(
         res.writeHead(200, corsH);
         res.end(JSON.stringify({ error: debugErr.message, bridgeUrl: process.env.BRIDGE_URL, tsMode: process.env.TS_MODE }));
       }
+      return;
+    }
+
+    // --- Plugin API (authenticated with PLUGIN_SECRET) ---
+
+    // Plugin poll: GET /api/plugin/poll - returns pending queries, marks plugin alive
+    if (url === "/api/plugin/poll") {
+      const authHeader = req.headers["authorization"] || "";
+      if (authHeader !== `Bearer ${PLUGIN_SECRET}`) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
+      pluginLastSeen = Date.now();
+
+      const pending = Array.from(pendingPluginQueries.entries()).map(([code, q]) => ({
+        code,
+        nexts: q.nexts,
+        remainingMin: q.remainingMin,
+      }));
+      // Clear pending after delivering to plugin
+      pendingPluginQueries.clear();
+
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ pending, pluginActive: true }));
+      return;
+    }
+
+    // Plugin push: POST /api/plugin/respinfo - receives bot query results
+    if (url === "/api/plugin/respinfo" && req.method === "POST") {
+      const authHeader = req.headers["authorization"] || "";
+      if (authHeader !== `Bearer ${PLUGIN_SECRET}`) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
+      pluginLastSeen = Date.now();
+
+      let body = "";
+      req.on("data", (chunk: Buffer) => body += chunk.toString());
+      req.on("end", () => {
+        try {
+          const { code, data } = JSON.parse(body);
+          if (code && data) {
+            const nexts = lastKnownNexts[code] ?? 0;
+            respInfoCache.set(code, { data, nextsWhenFetched: nexts });
+            lastBotContact = new Date();
+            console.log(`[Plugin] Received respinfo for ${code} from local agent`);
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err: any) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // Plugin status: GET /api/plugin/status
+    if (url === "/api/plugin/status") {
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({
+        connected: isPluginConnected(),
+        lastSeen: pluginLastSeen ? new Date(pluginLastSeen).toISOString() : null,
+        pendingQueries: pendingPluginQueries.size,
+      }));
       return;
     }
 
