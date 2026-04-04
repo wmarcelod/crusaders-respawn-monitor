@@ -11,6 +11,8 @@ import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.Headers;
 
+import com.github.manevolent.ts3j.util.Ts3Debugging;
+
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -39,6 +41,15 @@ public class TS3Bridge {
     private static final CopyOnWriteArrayList<Map<String, Object>> incomingMessages = new CopyOnWriteArrayList<>();
     private static final Gson gson = new Gson();
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+
+    // In-memory log ring buffer for debug
+    private static final CopyOnWriteArrayList<String> logBuffer = new CopyOnWriteArrayList<>();
+    private static void log(String msg) {
+        String line = "[" + System.currentTimeMillis() + "] " + msg;
+        System.out.println(line);
+        logBuffer.add(line);
+        while (logBuffer.size() > 200) logBuffer.remove(0);
+    }
 
     // Event-driven channel cache: channelId -> {channel_name, channel_description, ...}
     private static final ConcurrentHashMap<Integer, ConcurrentHashMap<String, String>> channelCache = new ConcurrentHashMap<>();
@@ -119,7 +130,8 @@ public class TS3Bridge {
 
     // ========== CHANNEL CACHE ==========
 
-    private static void mergeChannelEvent(int channelId, Map<String, String> update) {
+    private static void mergeChannelEvent(String source, int channelId, Map<String, String> update) {
+        log("[Cache] " + source + " cid=" + channelId + " keys=" + update.keySet() + " vals=" + update);
         channelCache.compute(channelId, (_key, existing) -> {
             ConcurrentHashMap<String, String> merged = existing == null
                     ? new ConcurrentHashMap<>()
@@ -139,7 +151,7 @@ public class TS3Bridge {
             int count = 0;
             for (Channel channel : tsClient.listChannels()) {
                 count++;
-                mergeChannelEvent(channel.getId(), channel.getMap());
+                mergeChannelEvent("syncChannelList", channel.getId(), channel.getMap());
             }
             System.out.println("[Bridge] Synced " + count + " channels into cache");
         } catch (Exception ex) {
@@ -197,22 +209,22 @@ public class TS3Bridge {
 
                 @Override
                 public void onChannelList(ChannelListEvent e) {
-                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                    mergeChannelEvent("onChannelList", e.getChannelId(), e.getMap());
                 }
 
                 @Override
                 public void onChannelEdit(ChannelEditedEvent e) {
-                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                    mergeChannelEvent("onChannelEdit", e.getChannelId(), e.getMap());
                 }
 
                 @Override
                 public void onChannelDescriptionChanged(ChannelDescriptionEditedEvent e) {
-                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                    mergeChannelEvent("onChannelDescChanged", e.getChannelId(), e.getMap());
                 }
 
                 @Override
                 public void onChannelCreate(ChannelCreateEvent e) {
-                    mergeChannelEvent(e.getChannelId(), e.getMap());
+                    mergeChannelEvent("onChannelCreate", e.getChannelId(), e.getMap());
                 }
 
                 @Override
@@ -336,6 +348,7 @@ public class TS3Bridge {
         server.createContext("/api/message", TS3Bridge::handleMessage);
         server.createContext("/api/messages", TS3Bridge::handleMessages);
         server.createContext("/api/debug/cache", TS3Bridge::handleDebugCache);
+        server.createContext("/api/debug/logs", TS3Bridge::handleDebugLogs);
 
         server.start();
         System.out.println("[Bridge] HTTP API started on port " + httpPort);
@@ -659,6 +672,14 @@ public class TS3Bridge {
         List<Map<String, Object>> msgs = new ArrayList<>(incomingMessages);
         incomingMessages.clear();
         sendJson(ex, 200, msgs);
+    }
+
+    /**
+     * GET /api/debug/logs - Return recent log lines.
+     */
+    private static void handleDebugLogs(HttpExchange ex) throws IOException {
+        if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
+        sendJson(ex, 200, new ArrayList<>(logBuffer));
     }
 
     /**
