@@ -49,7 +49,7 @@ public class TS3Bridge {
         String line = "[" + System.currentTimeMillis() + "] " + msg;
         System.out.println(line);
         logBuffer.add(line);
-        while (logBuffer.size() > 200) logBuffer.remove(0);
+        while (logBuffer.size() > 500) logBuffer.remove(0);
     }
 
     // Event-driven channel cache: channelId -> {channel_name, channel_description, ...}
@@ -189,11 +189,11 @@ public class TS3Bridge {
                 Map<String, String> data = info.getMap();
                 String desc = data.get("channel_description");
                 int descLen = (desc != null) ? desc.length() : -1;
-                log("[Desc] channelinfo cid=" + channelId + " desc_len=" + descLen +
-                    (descLen > 0 ? " desc_preview=" + desc.substring(0, Math.min(100, descLen)) : ""));
+                // Only log channels with descriptions to avoid flooding the log buffer
+                if (descLen > 0) {
+                    log("[Desc] cid=" + channelId + " len=" + descLen);
+                }
                 mergeChannelEvent("channelinfo", channelId, data);
-            } else {
-                log("[Desc] channelinfo cid=" + channelId + " returned null");
             }
         } catch (Exception ex) {
             log("[Desc] channelinfo cid=" + channelId + " failed: " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
@@ -460,6 +460,7 @@ public class TS3Bridge {
         server.createContext("/api/messages", TS3Bridge::handleMessages);
         server.createContext("/api/debug/cache", TS3Bridge::handleDebugCache);
         server.createContext("/api/debug/logs", TS3Bridge::handleDebugLogs);
+        server.createContext("/api/debug/resolve/", TS3Bridge::handleDebugResolve);
 
         server.start();
         System.out.println("[Bridge] HTTP API started on port " + httpPort);
@@ -762,6 +763,7 @@ public class TS3Bridge {
         }
 
         String body = readBody(ex);
+        log("[API] POST /api/message body=" + body);
         Map<String, Object> req;
         try {
             req = gson.fromJson(body, Map.class);
@@ -818,6 +820,23 @@ public class TS3Bridge {
     private static void handleDebugLogs(HttpExchange ex) throws IOException {
         if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
         sendJson(ex, 200, new ArrayList<>(logBuffer));
+    }
+
+    /**
+     * GET /api/debug/resolve/{uid} - Test UID resolution (for debugging).
+     */
+    private static void handleDebugResolve(HttpExchange ex) throws IOException {
+        if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
+        String path = ex.getRequestURI().getPath();
+        String prefix = "/api/debug/resolve/";
+        if (path.length() <= prefix.length()) {
+            sendJson(ex, 400, jsonObj("error", "Missing UID"));
+            return;
+        }
+        String uid = java.net.URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
+        log("[Debug] resolveUidToClid test for: " + uid);
+        int clid = resolveUidToClid(uid);
+        sendJson(ex, 200, jsonObj("uid", uid, "clid", clid, "found", clid > 0));
     }
 
     /**
