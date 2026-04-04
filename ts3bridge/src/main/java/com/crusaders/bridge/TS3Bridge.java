@@ -134,7 +134,7 @@ public class TS3Bridge {
     // ========== CHANNEL CACHE ==========
 
     private static void mergeChannelEvent(String source, int channelId, Map<String, String> update) {
-        log("[Cache] " + source + " cid=" + channelId + " keys=" + update.keySet() + " vals=" + update);
+        log("[Cache] " + source + " cid=" + channelId + " keys=" + update.keySet());
         channelCache.compute(channelId, (_key, existing) -> {
             ConcurrentHashMap<String, String> merged = existing == null
                     ? new ConcurrentHashMap<>()
@@ -144,60 +144,57 @@ public class TS3Bridge {
         });
     }
 
-    /**
-     * Fetch a single channel's description using raw command.
-     * Tries "channelvariable" first (TS3 client protocol), then "channelinfo" (ServerQuery).
-     */
-    private static void fetchChannelDescription(int channelId) {
-        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
+    // Lock for serialized command execution (prevents concurrent command conflicts)
+    private static final Object commandLock = new Object();
 
-        // Try channelinfo (works on some servers, returns full channel data including description)
+    // Track if descriptions are being fetched to prevent concurrent fetches
+    private static volatile boolean fetchingDescriptions = false;
+
+    /**
+     * Fetch a single channel's info via channelinfo command (serialized).
+     * Must be called within a synchronized(commandLock) block or from a single thread.
+     */
+    private static void fetchChannelInfoSerialized(int channelId) {
+        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
         try {
             Channel info = tsClient.getChannelInfo(channelId);
             if (info != null) {
                 Map<String, String> data = info.getMap();
-                log("[Desc] channelinfo cid=" + channelId + " keys=" + data.keySet());
-                if (data.containsKey("channel_description")) {
-                    mergeChannelEvent("channelinfo", channelId, data);
-                    return;
-                }
+                String desc = data.get("channel_description");
+                int descLen = (desc != null) ? desc.length() : -1;
+                log("[Desc] channelinfo cid=" + channelId + " desc_len=" + descLen +
+                    (descLen > 0 ? " desc_preview=" + desc.substring(0, Math.min(100, descLen)) : ""));
+                mergeChannelEvent("channelinfo", channelId, data);
+            } else {
+                log("[Desc] channelinfo cid=" + channelId + " returned null");
             }
         } catch (Exception ex) {
-            log("[Desc] channelinfo cid=" + channelId + " failed: " + ex.getMessage());
-        }
-
-        // Try raw "channelvariable" command (TS3 client protocol for requesting specific properties)
-        try {
-            SingleCommand cmd = new SingleCommand(
-                "channelvariable",
-                ProtocolRole.CLIENT,
-                new CommandSingleParameter("cid", Integer.toString(channelId)),
-                new CommandSingleParameter("channel_description", "")
-            );
-            Iterable<SingleCommand> result = tsClient.executeCommand(cmd).get();
-            for (SingleCommand sc : result) {
-                Map<String, String> data = sc.toMap();
-                log("[Desc] channelvariable cid=" + channelId + " keys=" + data.keySet() + " vals=" + data);
-                mergeChannelEvent("channelvariable", channelId, data);
-            }
-        } catch (Exception ex) {
-            log("[Desc] channelvariable cid=" + channelId + " failed: " + ex.getMessage());
+            log("[Desc] channelinfo cid=" + channelId + " failed: " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
         }
     }
 
     /**
-     * Fetch descriptions for all channels in the cache.
+     * Fetch descriptions for all channels in the cache (serialized, one at a time).
      */
     private static void fetchAllDescriptions() {
         if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
-        log("[Bridge] Fetching descriptions for " + channelCache.size() + " channels...");
-        for (int cid : channelCache.keySet()) {
-            ConcurrentHashMap<String, String> ch = channelCache.get(cid);
-            // Only fetch if we don't already have a description
-            String existingDesc = ch != null ? ch.get("channel_description") : null;
-            if (existingDesc == null || existingDesc.isEmpty() || "null".equals(existingDesc)) {
-                fetchChannelDescription(cid);
+        if (fetchingDescriptions) {
+            log("[Bridge] fetchAllDescriptions skipped (already in progress)");
+            return;
+        }
+        fetchingDescriptions = true;
+        try {
+            log("[Bridge] Fetching descriptions for " + channelCache.size() + " channels...");
+            for (int cid : channelCache.keySet()) {
+                synchronized (commandLock) {
+                    fetchChannelInfoSerialized(cid);
+                }
+                // Small delay between commands to not overwhelm the server
+                try { Thread.sleep(200); } catch (InterruptedException ignored) {}
             }
+            log("[Bridge] Description fetch complete");
+        } finally {
+            fetchingDescriptions = false;
         }
     }
 
@@ -265,12 +262,11 @@ public class TS3Bridge {
                 public void onConnected(ConnectedEvent e) {
                     log("[Bridge] onConnected event received");
                     // Schedule initial sync after connection stabilizes
+                    // syncChannelList already calls fetchAllDescriptions at the end
                     scheduler.schedule(() -> {
                         syncChannelList();
                         syncClientList();
-                    }, 2, TimeUnit.SECONDS);
-                    // Fetch descriptions after channel list is loaded (give extra time)
-                    scheduler.schedule(() -> fetchAllDescriptions(), 5, TimeUnit.SECONDS);
+                    }, 3, TimeUnit.SECONDS);
                 }
 
                 @Override
@@ -285,9 +281,9 @@ public class TS3Bridge {
 
                 @Override
                 public void onChannelDescriptionChanged(ChannelDescriptionEditedEvent e) {
-                    mergeChannelEvent("onChannelDescChanged", e.getChannelId(), e.getMap());
-                    // Try to fetch the actual description content
-                    scheduler.schedule(() -> fetchChannelDescription(e.getChannelId()), 500, TimeUnit.MILLISECONDS);
+                    // Just mark that this channel's description changed (cid only, no content)
+                    // Descriptions are fetched in batch during periodic sync
+                    log("[Event] descChanged cid=" + e.getChannelId());
                 }
 
                 @Override
