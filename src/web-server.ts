@@ -1373,6 +1373,7 @@ function renderHTML(
           sortDir: sortEl ? (sortEl.dataset.dir || 'asc') : 'asc',
           search: searchEl ? searchEl.value : '',
           voc: activeBtn ? activeBtn.dataset.voc : 'all',
+          favFilter: favFilterActive ? '1' : '0',
           freeExpanded: document.getElementById('freeTable') && document.getElementById('freeTable').style.display !== 'none' ? '1' : '0',
           freeResExpanded: document.getElementById('freeResTable') && document.getElementById('freeResTable').style.display !== 'none' ? '1' : '0'
         };
@@ -1421,10 +1422,15 @@ function renderHTML(
           if (frt) frt.style.display = 'block';
         }
 
-        // Apply if any filter/sort was restored
-        if (state.sort !== 'code' || state.sortDir !== 'asc' || state.search || (state.voc && state.voc !== 'all')) {
-          applyFilters();
+        // Restore favorites filter
+        if (state.favFilter === '1') {
+          favFilterActive = true;
+          var favBtn = document.getElementById('favFilterBtn');
+          if (favBtn) favBtn.classList.add('active');
         }
+
+        // Apply all restored filters
+        applyFilters();
       } catch(e) {}
     }
 
@@ -1548,11 +1554,8 @@ function renderHTML(
       scheduleRefresh();
     };
 
-    // Restore state from previous page load, then start auto-refresh
-    restoreState();
-    scheduleRefresh();
-
     // --- Favorites ---
+    var favFilterActive = false;
     function getFavorites() {
       try { return JSON.parse(localStorage.getItem('respawnFavorites') || '[]'); } catch(e) { return []; }
     }
@@ -1574,13 +1577,16 @@ function renderHTML(
         el.classList.toggle('active', favs.includes(el.dataset.code));
       });
     }
-    var favFilterActive = false;
     function toggleFavFilter() {
       favFilterActive = !favFilterActive;
       document.getElementById('favFilterBtn').classList.toggle('active', favFilterActive);
       applyFilters();
     }
+
+    // Restore state from previous page load, then start auto-refresh
     updateFavStars();
+    restoreState();
+    scheduleRefresh();
   </script>
 </body>
 </html>`;
