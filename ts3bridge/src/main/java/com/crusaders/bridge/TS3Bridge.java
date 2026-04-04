@@ -223,7 +223,10 @@ public class TS3Bridge {
                 client.connect(new InetSocketAddress(serverAddr, serverPort), null, 15000L);
                 client.waitForState(ClientConnectionState.CONNECTED, 15000L);
 
-                log("[TempConn] Connected (clid=" + client.getClientId() + "), sending to clid=" + targetClid);
+                log("[TempConn] Connected (clid=" + client.getClientId() + "), moving to AFK...");
+                moveToAfk(client);
+
+                log("[TempConn] Sending to clid=" + targetClid);
                 client.sendPrivateMessage(targetClid, message);
 
                 // Wait for bot response (poll for up to 6 seconds)
@@ -265,6 +268,39 @@ public class TS3Bridge {
             } catch (NumberFormatException ignored) {}
         }
         return lastKnownBotClid > 0 && targetClid == lastKnownBotClid;
+    }
+
+    // ========== MOVE TO AFK ==========
+
+    /**
+     * Find the AFK channel by searching channel names (case-insensitive).
+     * Returns -1 if not found.
+     */
+    private static int findAfkChannelId() {
+        for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : channelCache.entrySet()) {
+            String name = safe(entry.getValue().get("channel_name")).toLowerCase();
+            if (name.contains("afk") || name.contains("away")) {
+                return entry.getKey();
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Move a client to the AFK channel. Used for both main and temp connections.
+     */
+    private static void moveToAfk(LocalTeamspeakClientSocket client) {
+        try {
+            int afkCid = findAfkChannelId();
+            if (afkCid > 0) {
+                client.joinChannel(afkCid, null);
+                log("[Bridge] Moved to AFK channel (cid=" + afkCid + ")");
+            } else {
+                log("[Bridge] AFK channel not found in cache");
+            }
+        } catch (Exception e) {
+            log("[Bridge] Failed to move to AFK: " + e.getMessage());
+        }
     }
 
     // ========== CHANNEL CACHE ==========
@@ -528,6 +564,9 @@ public class TS3Bridge {
             tsClient = client;
             connected = true;
             System.out.println("[Bridge] Connected! ClientID=" + client.getClientId());
+
+            // Move to AFK channel after a delay (wait for channel cache to populate)
+            scheduler.schedule(() -> moveToAfk(client), 5, TimeUnit.SECONDS);
 
         } catch (Exception e) {
             connected = false;
