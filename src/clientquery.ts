@@ -17,12 +17,51 @@ dotenv.config();
 
 // --- Configuration ---
 
-type TSMode = "clientquery" | "serverquery";
+type TSMode = "clientquery" | "serverquery" | "bridge";
 
 function getMode(): TSMode {
   const mode = (process.env.TS_MODE || "clientquery").toLowerCase();
+  if (mode === "bridge") return "bridge";
   if (mode === "serverquery" || mode === "sq") return "serverquery";
   return "clientquery";
+}
+
+function getBridgeUrl(): string {
+  return process.env.BRIDGE_URL || "http://ts3bridge:8080";
+}
+
+/**
+ * Simple HTTP fetch for bridge mode (no external dependencies).
+ */
+async function bridgeFetch(path: string, method = "GET", body?: string): Promise<string> {
+  const url = getBridgeUrl() + path;
+  const http = await import("http");
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || 80,
+      path: urlObj.pathname + urlObj.search,
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      timeout: 10000,
+    };
+    const req = http.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => data += chunk.toString());
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(data);
+        } else {
+          reject(new Error(`Bridge HTTP ${res.statusCode}: ${data}`));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Bridge request timeout")); });
+    if (body) req.write(body);
+    req.end();
+  });
 }
 
 function getHost(): string {
@@ -222,13 +261,20 @@ export function encodeTSString(str: string): string {
 
 /**
  * Get the description of a specific channel.
- * Uses `channelinfo` for ServerQuery, `channelvariable` for ClientQuery.
+ * Uses `channelinfo` for ServerQuery, `channelvariable` for ClientQuery,
+ * or the bridge HTTP API.
  */
 export async function getChannelDescription(
   cid: number,
   apiKey?: string
 ): Promise<string> {
   const mode = getMode();
+
+  // Bridge mode: HTTP call
+  if (mode === "bridge") {
+    return await bridgeFetch(`/api/channel/${cid}/description`);
+  }
+
   // ServerQuery uses channelinfo, ClientQuery uses channelvariable
   const cmd = mode === "serverquery"
     ? `channelinfo cid=${cid}`
@@ -268,6 +314,19 @@ export async function getChannelDescription(
 export async function getChannelList(
   apiKey?: string
 ): Promise<Array<{ cid: number; name: string; clients: number }>> {
+  const mode = getMode();
+
+  // Bridge mode: HTTP call
+  if (mode === "bridge") {
+    const raw = await bridgeFetch("/api/channels");
+    const channels = JSON.parse(raw) as Array<{ cid: number; name: string; total_clients: number }>;
+    return channels.map(ch => ({
+      cid: ch.cid,
+      name: ch.name,
+      clients: ch.total_clients,
+    }));
+  }
+
   const raw = await runCommands(["channellist"]);
 
   const lines = raw.split("\n");
@@ -342,6 +401,22 @@ export async function findRespawnNumberChannel(
  * Filters out serverquery bots (client_type=1).
  */
 export async function getAllClients(apiKey?: string): Promise<TSClient[]> {
+  const mode = getMode();
+
+  // Bridge mode: HTTP call
+  if (mode === "bridge") {
+    const raw = await bridgeFetch("/api/clients");
+    const clients = JSON.parse(raw) as Array<{ clid: number; cid: number; nickname: string; client_type: number }>;
+    return clients
+      .filter(c => c.nickname && c.nickname !== "Unknown" && c.nickname !== "undefined")
+      .map(c => ({
+        clid: c.clid,
+        cid: c.cid,
+        nickname: c.nickname,
+        clientType: c.client_type,
+      }));
+  }
+
   const raw = await runCommands(["clientlist"]);
 
   const lines = raw.split("\n");
@@ -389,6 +464,14 @@ export async function sendTextMessage(
   targetClid: number,
   message: string
 ): Promise<string> {
+  const mode = getMode();
+
+  // Bridge mode: HTTP call
+  if (mode === "bridge") {
+    const body = JSON.stringify({ target_clid: targetClid, message });
+    return await bridgeFetch("/api/message", "POST", body);
+  }
+
   const escapedMsg = encodeTSString(message);
   return runCommands([
     "clientnotifyregister schandlerid=1 event=notifytextmessage",
@@ -400,6 +483,18 @@ export async function sendTextMessage(
  * Find a client by UID (for bot lookup).
  */
 export async function findClientByUid(uid: string): Promise<number | null> {
+  const mode = getMode();
+
+  // Bridge mode: HTTP call
+  if (mode === "bridge") {
+    try {
+      const raw = await bridgeFetch(`/api/client/uid/${encodeURIComponent(uid)}`);
+      const client = JSON.parse(raw) as { clid: number };
+      return client.clid;
+    } catch { /* bot not found */ }
+    return null;
+  }
+
   const escapedUid = uid.replace(/\//g, "\\/");
   try {
     const raw = await runCommands([`clientgetids cluid=${escapedUid}`]);

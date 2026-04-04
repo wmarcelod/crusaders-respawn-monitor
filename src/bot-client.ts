@@ -155,6 +155,82 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
 }
 
 /**
+ * Send !respinfo via bridge HTTP API.
+ * 1. Clear existing messages
+ * 2. Send message to bot
+ * 3. Wait for bot to respond
+ * 4. Collect responses
+ */
+async function sendRespInfoViaBridge(clid: number, code: string): Promise<string[] | null> {
+  const http = await import("http");
+  const bridgeUrl = process.env.BRIDGE_URL || "http://ts3bridge:8080";
+
+  function bridgeReq(path: string, method = "GET", body?: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const urlObj = new URL(bridgeUrl + path);
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || 80,
+        path: urlObj.pathname,
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+        timeout: 10000,
+      };
+      const req = http.request(options, (res) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => data += chunk.toString());
+        res.on("end", () => resolve(data));
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+      if (body) req.write(body);
+      req.end();
+    });
+  }
+
+  try {
+    // 1. Clear any existing messages
+    await bridgeReq("/api/messages");
+
+    // 2. Send !respinfo to bot
+    const sendBody = JSON.stringify({ target_clid: clid, message: `!respinfo ${code}` });
+    const sendResult = await bridgeReq("/api/message", "POST", sendBody);
+    const sendParsed = JSON.parse(sendResult);
+    if (!sendParsed.success) return null;
+
+    // 3. Wait for bot to respond (poll a few times)
+    const collectedMessages: string[] = [];
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const msgResult = await bridgeReq("/api/messages");
+      const msgs = JSON.parse(msgResult) as Array<{
+        from_clid: number;
+        from_name: string;
+        from_uid: string;
+        message: string;
+        timestamp: number;
+      }>;
+
+      for (const msg of msgs) {
+        if (msg.from_uid === BOT_UID) {
+          collectedMessages.push(msg.message);
+        }
+      }
+
+      // If we got messages and no new ones in last poll, we're done
+      if (collectedMessages.length > 0 && msgs.filter(m => m.from_uid === BOT_UID).length === 0) {
+        break;
+      }
+    }
+
+    return collectedMessages.length > 0 ? collectedMessages : null;
+  } catch (e) {
+    console.error("[Bot] Bridge request failed:", e);
+    return null;
+  }
+}
+
+/**
  * Send !respinfo to the bot and collect responses.
  * Opens a raw TCP connection with event listening for the bot's response.
  * This is separate from runCommands because we need to:
@@ -166,6 +242,11 @@ function parseRespInfoMessages(messages: string[]): Omit<RespInfoResult, "code" 
  */
 async function sendRespInfoAndCollect(clid: number, code: string): Promise<string[] | null> {
   const info = getTSConnectionInfo();
+
+  // Bridge mode: use HTTP API
+  if (info.mode === "bridge") {
+    return sendRespInfoViaBridge(clid, code);
+  }
 
   await acquireSemaphore();
 
