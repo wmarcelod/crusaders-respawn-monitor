@@ -7,4 +7,3 @@ logs
 .git
 .gitignore
 bot-uid.json
-respawn-aliases.json
