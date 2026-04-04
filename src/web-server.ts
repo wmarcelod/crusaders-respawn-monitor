@@ -517,7 +517,7 @@ function renderHTML(
   // Free respawns
   const freeRows = data.freeRespawns
     .map(
-      (r) => `<tr><td class="code">${escapeHtml(r.code)}</td><td>${escapeHtml(r.name)}</td></tr>`
+      (r) => `<tr data-code="${escapeHtml(r.code)}"><td><span class="fav-star" data-code="${escapeHtml(r.code)}" onclick="toggleFavorite('${escapeHtml(r.code)}')">★</span></td><td class="code">${escapeHtml(r.code)}</td><td>${escapeHtml(r.name)}</td></tr>`
     )
     .join("");
 
@@ -1224,10 +1224,10 @@ function renderHTML(
         </button>
       </div>
       <div id="freeTable" class="free-table" style="display:none;">
-        <table>
-          <thead><tr><th>Code</th><th>Respawn</th></tr></thead>
+        <table id="freeRespawnTable">
+          <thead><tr><th style="width:30px">★</th><th>Code</th><th>Respawn</th></tr></thead>
           <tbody>
-            ${freeRows || '<tr><td colspan="2" style="text-align:center;color:#52525b;">Todos ocupados</td></tr>'}
+            ${freeRows || '<tr><td colspan="3" style="text-align:center;color:#52525b;">Todos ocupados</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -1478,6 +1478,29 @@ function renderHTML(
         return cmp * sortDir;
       });
       sorted.forEach(function(row) { tbody.appendChild(row); });
+
+      // Filter free respawns table when favorites are active
+      var freeTable = document.getElementById('freeRespawnTable');
+      var freeSection = document.getElementById('freeTable');
+      if (freeTable && freeSection) {
+        var freeRows = Array.from(freeTable.querySelectorAll('tbody tr'));
+        if (favs) {
+          // Show free table and filter to favorites only
+          freeSection.style.display = 'block';
+          var freeVisible = 0;
+          freeRows.forEach(function(row) {
+            var code = row.dataset.code || '';
+            var show = favs.includes(code);
+            row.style.display = show ? '' : 'none';
+            if (show) freeVisible++;
+          });
+          // Update badge to show occupied + free favorites
+          if (badge) badge.textContent = visibleCount + ' ocupados / ' + freeVisible + ' livres';
+        } else {
+          // Reset: show all free rows
+          freeRows.forEach(function(row) { row.style.display = ''; });
+        }
+      }
     }
 
     document.getElementById('searchFilter').addEventListener('input', function() { applyFilters(); saveState(); });
