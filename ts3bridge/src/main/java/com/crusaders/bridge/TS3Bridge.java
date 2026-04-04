@@ -64,6 +64,7 @@ public class TS3Bridge {
     private static String nickname;
     private static int httpPort;
     private static String identityUid = "unknown";
+    private static volatile int lastKnownBotClid = -1; // Auto-learned from bot responses
     private static final Path DATA_DIR = Paths.get("data");
     private static final Path IDENTITY_FILE = DATA_DIR.resolve("identity.ini");
     private static final int IDENTITY_LEVEL = 10;
@@ -370,12 +371,22 @@ public class TS3Bridge {
 
                     incomingMessages.add(msg);
 
+                    // Auto-learn bot clid: if the message is from the BOT_UID, save its clid
+                    String botUidEnv = System.getenv("BOT_UID");
+                    if (botUidEnv != null && botUidEnv.equals(safe(e.getInvokerUniqueId()))) {
+                        int oldClid = lastKnownBotClid;
+                        lastKnownBotClid = e.getInvokerId();
+                        if (oldClid != lastKnownBotClid) {
+                            log("[Bridge] Auto-learned bot clid: " + lastKnownBotClid + " (was " + oldClid + ")");
+                        }
+                    }
+
                     // Keep max 100 messages
                     while (incomingMessages.size() > 100) {
                         incomingMessages.remove(0);
                     }
 
-                    System.out.println("[Bridge] MSG from " + e.getInvokerName() + ": " + e.getMessage());
+                    log("[Bridge] MSG from " + e.getInvokerName() + " (clid=" + e.getInvokerId() + " uid=" + safe(e.getInvokerUniqueId()) + "): " + safe(e.getMessage()));
                 }
 
                 @Override
@@ -534,6 +545,9 @@ public class TS3Bridge {
         status.put("uid", identityUid);
         status.put("channels", channelCache.size());
         status.put("clients", clientCache.size());
+        status.put("lastKnownBotClid", lastKnownBotClid);
+        String botClidEnv = System.getenv("BOT_CLID");
+        status.put("botClidEnv", botClidEnv != null ? botClidEnv : "not set");
 
         sendJson(ex, 200, status);
     }
@@ -781,9 +795,40 @@ public class TS3Bridge {
             // Support target_uid as alternative to target_clid (resolves UID -> clid internally)
             if (req.containsKey("target_uid")) {
                 String targetUid = (String) req.get("target_uid");
+                // Try dynamic resolution first
                 targetClid = resolveUidToClid(targetUid);
+                // Fallback: check clientCache for UID (from onClientJoin events)
                 if (targetClid <= 0) {
-                    sendJson(ex, 404, jsonObj("success", false, "error", "Could not resolve UID to clid: " + targetUid));
+                    for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : clientCache.entrySet()) {
+                        String cuid = entry.getValue().get("client_unique_identifier");
+                        if (targetUid.equals(cuid)) {
+                            targetClid = entry.getKey();
+                            log("[Bridge] Found target_uid in clientCache: clid=" + targetClid);
+                            break;
+                        }
+                    }
+                }
+                // Fallback: BOT_CLID env var (static, for bots that don't appear in clientlist)
+                if (targetClid <= 0) {
+                    String botClidEnv = System.getenv("BOT_CLID");
+                    if (botClidEnv != null && !botClidEnv.isEmpty()) {
+                        try {
+                            targetClid = Integer.parseInt(botClidEnv);
+                            log("[Bridge] Using BOT_CLID env fallback: clid=" + targetClid);
+                        } catch (NumberFormatException nfe) {
+                            log("[Bridge] Invalid BOT_CLID env: " + botClidEnv);
+                        }
+                    }
+                }
+                // Fallback: lastKnownBotClid (from previous bot responses)
+                if (targetClid <= 0 && lastKnownBotClid > 0) {
+                    targetClid = lastKnownBotClid;
+                    log("[Bridge] Using lastKnownBotClid: " + targetClid);
+                }
+                if (targetClid <= 0) {
+                    log("[Bridge] Could not resolve target_uid: " + targetUid);
+                    sendJson(ex, 404, jsonObj("success", false, "error",
+                        "Could not resolve UID. Set BOT_CLID env var with the bot's client ID."));
                     return;
                 }
                 log("[Bridge] Resolved target_uid=" + targetUid + " -> clid=" + targetClid);
