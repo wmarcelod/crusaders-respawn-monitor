@@ -2431,11 +2431,13 @@ async function handleRequest(
     }
 
     // Debug: proxy bridge endpoints
-    if (url === "/api/debug/bridge-logs" || url === "/api/debug/bridge-cache") {
+    if (url === "/api/debug/bridge-logs" || url === "/api/debug/bridge-cache" || url === "/api/debug/bridge-status") {
       const corsH = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
       try {
         const bridgeUrl = process.env.BRIDGE_URL || "http://localhost:8080";
-        const bridgePath = url === "/api/debug/bridge-logs" ? "/api/debug/logs" : "/api/debug/cache";
+        const bridgePath = url === "/api/debug/bridge-logs" ? "/api/debug/logs"
+          : url === "/api/debug/bridge-status" ? "/api/status"
+          : "/api/debug/cache";
         const raw = await new Promise<string>((resolve, reject) => {
           http.get(`${bridgeUrl}${bridgePath}`, (resp) => {
             let data = "";
