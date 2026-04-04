@@ -65,6 +65,8 @@ public class TS3Bridge {
     private static int httpPort;
     private static String identityUid = "unknown";
     private static volatile int lastKnownBotClid = -1; // Auto-learned from bot responses
+    private static volatile LocalIdentity userIdentity = null; // User's identity for brief bot queries
+    private static final Object tempConnLock = new Object(); // Serialize temp connections
     private static final Path DATA_DIR = Paths.get("data");
     private static final Path IDENTITY_FILE = DATA_DIR.resolve("identity.ini");
     private static final int IDENTITY_LEVEL = 10;
@@ -90,10 +92,25 @@ public class TS3Bridge {
         // Start HTTP server first (non-blocking)
         startHttpServer();
 
-        // Load or create TS3 identity
+        // Load or create TS3 identity (bridge's own)
         LocalIdentity identity = loadIdentity();
         identityUid = identity.getUid().toBase64();
         System.out.println("  UID:       " + identityUid);
+
+        // Load user's identity for brief bot queries
+        String userIdentityB64 = System.getenv("USER_IDENTITY");
+        if (userIdentityB64 != null && !userIdentityB64.isEmpty()) {
+            try {
+                byte[] iniBytes = Base64.getDecoder().decode(userIdentityB64);
+                userIdentity = LocalIdentity.read(new ByteArrayInputStream(iniBytes));
+                System.out.println("  UserUID:   " + userIdentity.getUid().toBase64());
+                System.out.println("  Bot queries will use temporary user identity connection");
+            } catch (Exception e) {
+                System.out.println("  WARNING: Failed to parse USER_IDENTITY: " + e.getMessage());
+            }
+        } else {
+            System.out.println("  USER_IDENTITY not set - bot queries use main connection");
+        }
         System.out.println("============================================");
 
         // Connect (blocks forever with reconnection)
@@ -153,6 +170,101 @@ public class TS3Bridge {
         try (OutputStream out = Files.newOutputStream(IDENTITY_FILE)) {
             identity.save(out);
         }
+    }
+
+    // ========== TEMP CONNECTION FOR BOT QUERIES ==========
+
+    /**
+     * Send a message via a temporary connection using the user's identity.
+     * Connects briefly, sends message, waits for bot response, disconnects.
+     * Returns collected bot messages, or null on failure.
+     */
+    private static List<Map<String, Object>> sendViaTempConnection(int targetClid, String message) {
+        if (userIdentity == null) return null;
+
+        synchronized (tempConnLock) {
+            LocalTeamspeakClientSocket tempClient = null;
+            List<Map<String, Object>> collected = new CopyOnWriteArrayList<>();
+
+            try {
+                tempClient = new LocalTeamspeakClientSocket();
+                tempClient.setIdentity(userIdentity);
+                tempClient.setNickname(nickname); // Same as bridge, will get suffix if needed
+                tempClient.setHWID("CrusaderBridgeTemp");
+
+                final LocalTeamspeakClientSocket client = tempClient;
+                String botUidEnv = System.getenv("BOT_UID");
+
+                client.addListener(new TS3Listener() {
+                    @Override
+                    public void onTextMessage(TextMessageEvent e) {
+                        try {
+                            if (e.getInvokerId() == client.getClientId()) return;
+                        } catch (Exception ignored) {}
+
+                        Map<String, Object> msg = new LinkedHashMap<>();
+                        msg.put("from_clid", e.getInvokerId());
+                        msg.put("from_name", safe(e.getInvokerName()));
+                        msg.put("from_uid", safe(e.getInvokerUniqueId()));
+                        msg.put("message", safe(e.getMessage()));
+                        msg.put("timestamp", System.currentTimeMillis() / 1000);
+                        collected.add(msg);
+
+                        // Also auto-learn bot clid
+                        if (botUidEnv != null && botUidEnv.equals(safe(e.getInvokerUniqueId()))) {
+                            lastKnownBotClid = e.getInvokerId();
+                        }
+
+                        log("[TempConn] MSG from " + e.getInvokerName() + ": " + safe(e.getMessage()));
+                    }
+                });
+
+                log("[TempConn] Connecting with user identity to query bot...");
+                client.connect(new InetSocketAddress(serverAddr, serverPort), null, 15000L);
+                client.waitForState(ClientConnectionState.CONNECTED, 15000L);
+
+                log("[TempConn] Connected (clid=" + client.getClientId() + "), sending to clid=" + targetClid);
+                client.sendPrivateMessage(targetClid, message);
+
+                // Wait for bot response (poll for up to 6 seconds)
+                long deadline = System.currentTimeMillis() + 6000;
+                int lastCount = 0;
+                while (System.currentTimeMillis() < deadline) {
+                    Thread.sleep(500);
+                    // If we got messages and no new ones in last 1.5s, we're done
+                    if (collected.size() > 0 && collected.size() == lastCount) break;
+                    lastCount = collected.size();
+                }
+
+                log("[TempConn] Collected " + collected.size() + " messages, disconnecting");
+                try { client.disconnect(); } catch (Exception ignored) {}
+
+                // Add collected messages to the main incomingMessages so the dashboard can poll them
+                incomingMessages.addAll(collected);
+
+                return collected;
+
+            } catch (Exception e) {
+                log("[TempConn] Error: " + e.getMessage());
+                if (tempClient != null) {
+                    try { tempClient.disconnect(); } catch (Exception ignored) {}
+                }
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Check if a target clid is the bot (should use temp connection).
+     */
+    private static boolean isBotTarget(int targetClid) {
+        String botClidEnv = System.getenv("BOT_CLID");
+        if (botClidEnv != null) {
+            try {
+                if (Integer.parseInt(botClidEnv) == targetClid) return true;
+            } catch (NumberFormatException ignored) {}
+        }
+        return lastKnownBotClid > 0 && targetClid == lastKnownBotClid;
     }
 
     // ========== CHANNEL CACHE ==========
@@ -548,6 +660,7 @@ public class TS3Bridge {
         status.put("lastKnownBotClid", lastKnownBotClid);
         String botClidEnv = System.getenv("BOT_CLID");
         status.put("botClidEnv", botClidEnv != null ? botClidEnv : "not set");
+        status.put("userIdentityLoaded", userIdentity != null);
 
         sendJson(ex, 200, status);
     }
@@ -840,9 +953,20 @@ public class TS3Bridge {
             return;
         }
 
+        // If USER_IDENTITY is configured and target is the bot, use temp connection
+        if (userIdentity != null && isBotTarget(targetClid)) {
+            log("[Bridge] Bot target detected, using temp user identity connection");
+            List<Map<String, Object>> result = sendViaTempConnection(targetClid, message);
+            if (result != null) {
+                sendJson(ex, 200, jsonObj("success", true, "method", "temp_connection", "messages_collected", result.size()));
+                return;
+            }
+            log("[Bridge] Temp connection failed, falling back to main connection");
+        }
+
         try {
             tsClient.sendPrivateMessage(targetClid, message);
-            sendJson(ex, 200, jsonObj("success", true));
+            sendJson(ex, 200, jsonObj("success", true, "method", "main_connection"));
         } catch (Exception e) {
             sendJson(ex, 200, jsonObj("success", false, "error", e.getMessage()));
         }
