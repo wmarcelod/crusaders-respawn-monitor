@@ -271,6 +271,14 @@ public class TS3Bridge {
             );
             client.waitForState(ClientConnectionState.CONNECTED, 20000L);
 
+            // Subscribe to all channels so we receive description change events
+            try {
+                client.subscribeAll();
+                System.out.println("[Bridge] Subscribed to all channels");
+            } catch (Exception subEx) {
+                System.out.println("[Bridge] subscribeAll failed: " + subEx.getMessage());
+            }
+
             tsClient = client;
             connected = true;
             System.out.println("[Bridge] Connected! ClientID=" + client.getClientId());
@@ -327,6 +335,7 @@ public class TS3Bridge {
         server.createContext("/api/client/uid/", TS3Bridge::handleClientByUid);
         server.createContext("/api/message", TS3Bridge::handleMessage);
         server.createContext("/api/messages", TS3Bridge::handleMessages);
+        server.createContext("/api/debug/cache", TS3Bridge::handleDebugCache);
 
         server.start();
         System.out.println("[Bridge] HTTP API started on port " + httpPort);
@@ -650,5 +659,25 @@ public class TS3Bridge {
         List<Map<String, Object>> msgs = new ArrayList<>(incomingMessages);
         incomingMessages.clear();
         sendJson(ex, 200, msgs);
+    }
+
+    /**
+     * GET /api/debug/cache - Dump raw channel cache for debugging.
+     */
+    private static void handleDebugCache(HttpExchange ex) throws IOException {
+        if ("OPTIONS".equals(ex.getRequestMethod())) { handleOptions(ex); return; }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("totalChannels", channelCache.size());
+        result.put("totalClients", clientCache.size());
+        result.put("connected", connected);
+
+        Map<String, Object> channels = new LinkedHashMap<>();
+        for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : channelCache.entrySet()) {
+            Map<String, String> ch = new LinkedHashMap<>(entry.getValue());
+            channels.put(String.valueOf(entry.getKey()), ch);
+        }
+        result.put("channels", channels);
+        sendJson(ex, 200, result);
     }
 }
