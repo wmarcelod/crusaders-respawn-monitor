@@ -375,7 +375,6 @@ function renderHTML(
           ${hasBotQueue ? freeAt + ' <span class="queue-indicator">+fila</span>' : e.nexts > 0 ? '<span class="queue-indicator">+' + e.nexts + ' fila</span>' : freeAt}
         </td>
         <td class="nexts">${filaHtml}</td>
-        <td class="status">${statusBadge(e)}</td>
       </tr>`;
     })
     .join("");
@@ -517,6 +516,12 @@ function renderHTML(
       text-align: left;
       border-bottom: 1px solid #1e2030;
     }
+    th.sortable { cursor: pointer; user-select: none; transition: color 0.15s; }
+    th.sortable:hover { color: #818cf8; }
+    th.sortable.active { color: #818cf8; }
+    .sort-arrow { font-size: 0.8em; margin-left: 2px; }
+    th.sortable.asc .sort-arrow::after { content: "▲"; }
+    th.sortable.desc .sort-arrow::after { content: "▼"; }
 
     tbody td {
       padding: 10px 14px;
@@ -1030,14 +1035,6 @@ function renderHTML(
         <div class="label">Ativos</div>
         <div class="value">${active.length}</div>
       </div>
-      <div class="stat-card almost">
-        <div class="label">Acabando</div>
-        <div class="value">${almostDone.length}</div>
-      </div>
-      <div class="stat-card switching">
-        <div class="label">Trocando</div>
-        <div class="value">${entryWindow.length + leaving.length}</div>
-      </div>
       <div class="stat-card free">
         <div class="label">Livres</div>
         <div class="value">${data.freeRespawns.length}</div>
@@ -1059,31 +1056,23 @@ function renderHTML(
         <button class="voc-filter-btn" data-voc="ms">MS</button>
         <button class="voc-filter-btn" data-voc="ed">ED</button>
       </div>
-      <select id="sortSelect" class="sort-select">
-        <option value="code">Ordenar: Code</option>
-        <option value="remaining">Ordenar: Restante</option>
-        <option value="level-desc">Ordenar: Level &#8595;</option>
-        <option value="level-asc">Ordenar: Level &#8593;</option>
-        <option value="exit">Ordenar: Livre as</option>
-        <option value="respawn">Ordenar: Respawn</option>
-      </select>
+      <input type="hidden" id="sortSelect" value="code">
     </div>
 
     <table>
       <thead>
         <tr>
-          <th>Code</th>
-          <th>Respawn</th>
-          <th>Jogador</th>
+          <th class="sortable" data-sort="code">Code <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="respawn">Respawn <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="player">Jogador <span class="sort-arrow"></span></th>
           <th>Tempo / Total</th>
-          <th>Restante</th>
-          <th>Livre as</th>
+          <th class="sortable" data-sort="remaining">Restante <span class="sort-arrow"></span></th>
+          <th class="sortable" data-sort="exit">Livre as <span class="sort-arrow"></span></th>
           <th>Fila</th>
-          <th>Status</th>
         </tr>
       </thead>
       <tbody>
-        ${rows || '<tr><td colspan="8" style="text-align:center;padding:40px;color:#52525b;">Nenhum respawn ocupado</td></tr>'}
+        ${rows || '<tr><td colspan="7" style="text-align:center;padding:40px;color:#52525b;">Nenhum respawn ocupado</td></tr>'}
       </tbody>
     </table>
 
@@ -1263,6 +1252,7 @@ function renderHTML(
         var activeBtn = document.querySelector('.voc-filter-btn.active');
         var state = {
           sort: sortEl ? sortEl.value : 'code',
+          sortDir: sortEl ? (sortEl.dataset.dir || 'asc') : 'asc',
           search: searchEl ? searchEl.value : '',
           voc: activeBtn ? activeBtn.dataset.voc : 'all',
           freeExpanded: document.getElementById('freeTable') && document.getElementById('freeTable').style.display !== 'none' ? '1' : '0',
@@ -1280,7 +1270,15 @@ function renderHTML(
 
         if (state.sort) {
           var sortEl = document.getElementById('sortSelect');
-          if (sortEl) sortEl.value = state.sort;
+          if (sortEl) {
+            sortEl.value = state.sort;
+            sortEl.dataset.dir = state.sortDir || 'asc';
+            // Highlight active column header
+            document.querySelectorAll('th.sortable').forEach(function(t) {
+              t.classList.remove('active','asc','desc');
+              if (t.dataset.sort === state.sort) t.classList.add('active', state.sortDir || 'asc');
+            });
+          }
         }
 
         if (state.search) {
@@ -1306,7 +1304,7 @@ function renderHTML(
         }
 
         // Apply if any filter/sort was restored
-        if (state.sort !== 'code' || state.search || (state.voc && state.voc !== 'all')) {
+        if (state.sort !== 'code' || state.sortDir !== 'asc' || state.search || (state.voc && state.voc !== 'all')) {
           applyFilters();
         }
       } catch(e) {}
@@ -1333,21 +1331,46 @@ function renderHTML(
         row.style.display = (matchSearch && matchVoc) ? '' : 'none';
       });
 
+      var sortDir = (document.getElementById('sortSelect').dataset.dir || 'asc') === 'asc' ? 1 : -1;
       var sorted = rows.sort(function(a, b) {
+        var cmp = 0;
         switch(sortBy) {
-          case 'remaining': return parseInt(a.dataset.remaining||'9999') - parseInt(b.dataset.remaining||'9999');
-          case 'level-desc': return parseInt(b.dataset.level||'0') - parseInt(a.dataset.level||'0');
-          case 'level-asc': return parseInt(a.dataset.level||'0') - parseInt(b.dataset.level||'0');
-          case 'exit': return (a.dataset.exit||'').localeCompare(b.dataset.exit||'');
-          case 'respawn': return (a.dataset.respawn||'').localeCompare(b.dataset.respawn||'');
-          default: return (a.dataset.code||'').localeCompare(b.dataset.code||'', undefined, {numeric: true});
+          case 'remaining': cmp = parseInt(a.dataset.remaining||'9999') - parseInt(b.dataset.remaining||'9999'); break;
+          case 'exit': cmp = (a.dataset.exit||'').localeCompare(b.dataset.exit||''); break;
+          case 'respawn': cmp = (a.dataset.respawn||'').localeCompare(b.dataset.respawn||''); break;
+          case 'player': cmp = (a.dataset.player||'').localeCompare(b.dataset.player||''); break;
+          default: cmp = (a.dataset.code||'').localeCompare(b.dataset.code||'', undefined, {numeric: true});
         }
+        return cmp * sortDir;
       });
       sorted.forEach(function(row) { tbody.appendChild(row); });
     }
 
     document.getElementById('searchFilter').addEventListener('input', function() { applyFilters(); saveState(); });
-    document.getElementById('sortSelect').addEventListener('change', function() { applyFilters(); saveState(); });
+
+    // Click-to-sort on column headers
+    document.querySelectorAll('th.sortable').forEach(function(th) {
+      th.addEventListener('click', function() {
+        var sortKey = th.dataset.sort;
+        var sortEl = document.getElementById('sortSelect');
+        var currentDir = sortEl.dataset.dir || 'asc';
+
+        // Toggle direction if same column, otherwise reset to asc
+        if (sortEl.value === sortKey) {
+          sortEl.dataset.dir = currentDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          sortEl.value = sortKey;
+          sortEl.dataset.dir = 'asc';
+        }
+
+        // Update visual indicators
+        document.querySelectorAll('th.sortable').forEach(function(t) { t.classList.remove('active','asc','desc'); });
+        th.classList.add('active', sortEl.dataset.dir);
+
+        applyFilters();
+        saveState();
+      });
+    });
     document.querySelectorAll('.voc-filter-btn').forEach(function(btn) {
       btn.addEventListener('click', function() {
         document.querySelectorAll('.voc-filter-btn').forEach(function(b) { b.classList.remove('active'); });
