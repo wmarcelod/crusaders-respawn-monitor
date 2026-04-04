@@ -2432,13 +2432,23 @@ async function handleRequest(
 
     // Debug: raw channel list from bridge
     if (url === "/api/debug/channels") {
+      const corsH = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
       try {
         const channels = await getChannelList();
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify({ total: channels.length, channels }, null, 2));
+        const respCh = await findRespawnListChannel();
+        const numCh = await findRespawnNumberChannel();
+        let descPreview = "";
+        if (respCh) {
+          try {
+            const d = await getChannelDescription(respCh.cid);
+            descPreview = d.substring(0, 200);
+          } catch (e: any) { descPreview = "ERROR: " + e.message; }
+        }
+        res.writeHead(200, corsH);
+        res.end(JSON.stringify({ total: channels.length, channels, respawnListChannel: respCh, respawnNumberChannel: numCh, descPreview, bridgeUrl: process.env.BRIDGE_URL, tsMode: process.env.TS_MODE }, null, 2));
       } catch (debugErr: any) {
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-        res.end(JSON.stringify({ error: debugErr.message, bridgeUrl: process.env.BRIDGE_URL }));
+        res.writeHead(200, corsH);
+        res.end(JSON.stringify({ error: debugErr.message, bridgeUrl: process.env.BRIDGE_URL, tsMode: process.env.TS_MODE }));
       }
       return;
     }
