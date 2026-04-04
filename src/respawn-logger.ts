@@ -20,6 +20,7 @@ import {
   TibiaCharacter,
 } from "./tibia-api";
 import { RespawnEntry } from "./respawn-parser";
+import { resolveFullNickname } from "./client-tracker";
 
 const LOG_DIR = path.join(__dirname, "..", "logs");
 const LOG_FILE = path.join(LOG_DIR, "respawn-history.json");
@@ -143,10 +144,14 @@ export async function processSnapshot(entries: RespawnEntry[]): Promise<{
   const playersData = readPlayersData();
   const now = new Date().toISOString();
 
-  // Build current state: code -> displayName
+  // Build current state: code -> resolvedDisplayName
+  // Resolve truncated names (e.g. "Marlito Sorc..." → "Marlito Sorcerer") via client tracker
   const currentState: Record<string, string> = {};
+  const resolvedNames: Record<string, string> = {}; // code -> resolved name
   for (const e of entries) {
-    currentState[e.code] = e.occupiedBy;
+    const resolved = resolveFullNickname(e.occupiedBy, e.occupiedByUid);
+    currentState[e.code] = resolved;
+    resolvedNames[e.code] = resolved;
   }
 
   // Detect exits: codes in lastSnapshot but not in currentState (or different player)
@@ -165,12 +170,13 @@ export async function processSnapshot(entries: RespawnEntry[]): Promise<{
   }
 
   // Detect new entries: codes in currentState but not in lastSnapshot (or different player)
-  const newPlayers: Array<{ entry: RespawnEntry; charNames: string[] }> = [];
+  const newPlayers: Array<{ entry: RespawnEntry; resolvedName: string; charNames: string[] }> = [];
   for (const e of entries) {
+    const resolved = resolvedNames[e.code] || e.occupiedBy;
     const prevPlayer = logData.lastSnapshot[e.code];
-    if (!prevPlayer || prevPlayer !== e.occupiedBy) {
-      const charNames = extractCharNames(e.occupiedBy);
-      newPlayers.push({ entry: e, charNames });
+    if (!prevPlayer || prevPlayer !== resolved) {
+      const charNames = extractCharNames(resolved);
+      newPlayers.push({ entry: e, resolvedName: resolved, charNames });
     }
   }
 
@@ -182,7 +188,7 @@ export async function processSnapshot(entries: RespawnEntry[]): Promise<{
 
   // Create log entries for new players
   let newEntries = 0;
-  for (const { entry, charNames } of newPlayers) {
+  for (const { entry, resolvedName, charNames } of newPlayers) {
     // Find the best character data (first match)
     let tibiaChar: TibiaCharacter | null = null;
     for (const cn of charNames) {
@@ -195,7 +201,7 @@ export async function processSnapshot(entries: RespawnEntry[]): Promise<{
       endedAt: null,
       code: entry.code,
       respawnName: entry.name,
-      displayName: entry.occupiedBy,
+      displayName: resolvedName,
       charNames,
       vocation: tibiaChar?.vocation || "?",
       vocationShort: tibiaChar ? shortVocation(tibiaChar.vocation) : "?",
@@ -208,9 +214,9 @@ export async function processSnapshot(entries: RespawnEntry[]): Promise<{
     logData.entries.push(logEntry);
     newEntries++;
 
-    // Update player profile
+    // Update player profile (use resolved name)
     if (tibiaChar) {
-      updatePlayerProfile(playersData, tibiaChar, entry, charNames);
+      updatePlayerProfile(playersData, tibiaChar, entry, resolvedName, charNames);
     }
   }
 
@@ -226,6 +232,7 @@ function updatePlayerProfile(
   playersData: PlayersData,
   tibiaChar: TibiaCharacter,
   entry: RespawnEntry,
+  resolvedName: string,
   charNames: string[]
 ): void {
   const key = tibiaChar.name.toLowerCase();
@@ -259,10 +266,18 @@ function updatePlayerProfile(
   profile.guild = tibiaChar.guild || "";
   profile.lastSeen = now;
 
-  // Track display names
-  if (!profile.displayNames.includes(entry.occupiedBy)) {
-    profile.displayNames.push(entry.occupiedBy);
+  // Track display names (use resolved full name, not truncated)
+  if (!profile.displayNames.includes(resolvedName)) {
+    profile.displayNames.push(resolvedName);
   }
+  // Clean up: remove truncated versions if full name is now known
+  profile.displayNames = profile.displayNames.filter(dn => {
+    const clean = dn.replace(/\.{2,}$/, "").trim();
+    if (clean !== dn && resolvedName.toLowerCase().startsWith(clean.toLowerCase())) {
+      return false; // remove truncated version
+    }
+    return true;
+  });
   for (const cn of charNames) {
     if (!profile.charNames.includes(cn)) {
       profile.charNames.push(cn);
