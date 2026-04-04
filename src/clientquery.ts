@@ -408,8 +408,12 @@ export async function getAllClients(apiKey?: string): Promise<TSClient[]> {
     const raw = await bridgeFetch("/api/clients");
     const clients = JSON.parse(raw) as Array<{ clid: number; cid: number; nickname: string; client_type: number }>;
     return clients
-      .filter(c => c.nickname && c.nickname !== "Unknown" && c.nickname !== "undefined"
-        && !c.nickname.toLowerCase().startsWith("crusaderbridge"))
+      .filter(c => {
+        if (!c.nickname || c.nickname === "Unknown" || c.nickname === "undefined") return false;
+        const bridgeNick = (process.env.BRIDGE_NICKNAME || "").toLowerCase();
+        if (bridgeNick && c.nickname.toLowerCase() === bridgeNick) return false;
+        return true;
+      })
       .map(c => ({
         clid: c.clid,
         cid: c.cid,
