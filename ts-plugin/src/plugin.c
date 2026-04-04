@@ -32,7 +32,7 @@
 #include "plugin_definitions.h"
 
 /* --- Plugin info --- */
-#define PLUGIN_API_VERSION 26
+#define PLUGIN_API_VERSION 22
 #define PLUGIN_NAME "Crusaders Monitor"
 #define PLUGIN_VERSION "1.0.0"
 #define PLUGIN_AUTHOR "Crusaders"
@@ -407,6 +407,23 @@ __declspec(dllexport) int ts3plugin_offersConfigure(void) {
 
 __declspec(dllexport) void ts3plugin_registerPluginID(const char* id) {
     strncpy(pluginID, id, sizeof(pluginID) - 1);
+}
+
+/**
+ * Called when connection status changes.
+ * Auto-mutes microphone when connecting to any server.
+ */
+__declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
+    uint64 serverConnectionHandlerID,
+    int newStatus,
+    unsigned int errorNumber
+) {
+    (void)errorNumber;
+    if (newStatus == STATUS_CONNECTION_ESTABLISHED) {
+        ts3.setClientSelfVariableAsInt(serverConnectionHandlerID, CLIENT_INPUT_MUTED, 1);
+        ts3.flushClientSelfUpdates(serverConnectionHandlerID, NULL);
+        pluginLog("Auto-muted microphone on connect");
+    }
 }
 
 /**

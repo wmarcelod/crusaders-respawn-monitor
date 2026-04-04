@@ -129,6 +129,7 @@ export interface TSClient {
   clid: number;
   cid: number;
   nickname: string;
+  uid: string;
   clientType: number; // 0 = normal, 1 = serverquery
 }
 
@@ -406,7 +407,7 @@ export async function getAllClients(apiKey?: string): Promise<TSClient[]> {
   // Bridge mode: HTTP call
   if (mode === "bridge") {
     const raw = await bridgeFetch("/api/clients");
-    const clients = JSON.parse(raw) as Array<{ clid: number; cid: number; nickname: string; client_type: number }>;
+    const clients = JSON.parse(raw) as Array<{ clid: number; cid: number; nickname: string; uid?: string; client_type: number }>;
     return clients
       .filter(c => {
         if (!c.nickname || c.nickname === "Unknown" || c.nickname === "undefined") return false;
@@ -418,6 +419,7 @@ export async function getAllClients(apiKey?: string): Promise<TSClient[]> {
         clid: c.clid,
         cid: c.cid,
         nickname: c.nickname,
+        uid: c.uid || "",
         clientType: c.client_type,
       }));
   }
@@ -443,6 +445,7 @@ export async function getAllClients(apiKey?: string): Promise<TSClient[]> {
     const cidMatch = entry.match(/\bcid=(\d+)/);
     const nicknameMatch = entry.match(/client_nickname=(\S+)/);
     const typeMatch = entry.match(/client_type=(\d+)/);
+    const uidMatch = entry.match(/client_unique_identifier=(\S+)/);
 
     const clientType = parseInt(typeMatch?.[1] || "0");
     if (clientType === 1) continue;
@@ -454,6 +457,7 @@ export async function getAllClients(apiKey?: string): Promise<TSClient[]> {
       clid: parseInt(clidMatch?.[1] || "0"),
       cid: parseInt(cidMatch?.[1] || "0"),
       nickname,
+      uid: decodeTSString(uidMatch?.[1]?.trim() || ""),
       clientType,
     });
   }

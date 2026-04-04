@@ -22,6 +22,7 @@ const LOOKUP_BATCH_DELAY_MS = 1_000; // 1 second between batches
 export interface TrackedClient {
   nickname: string;       // TS display name
   charName: string;       // Best matching Tibia character name
+  uid: string;            // TS unique identifier
   clid: number;
   cid: number;            // Channel they're in
   tibiaData: TibiaCharacter | null;
@@ -31,6 +32,8 @@ export interface TrackedClient {
 
 // Cache of all tracked clients
 let trackedClients: Map<string, TrackedClient> = new Map();
+// UID -> nickname map for resolving truncated player names
+let uidToNickname: Map<string, string> = new Map();
 
 // Lookup queue: nicknames that need Tibia data resolved
 let lookupQueue: string[] = [];
@@ -58,6 +61,43 @@ export function getTrackedClient(nickname: string): TrackedClient | null {
     if (key.toLowerCase() === lower) return client;
   }
   return null;
+}
+
+/**
+ * Get a tracked client by TS unique identifier (UID).
+ */
+export function getTrackedClientByUid(uid: string): TrackedClient | null {
+  if (!uid) return null;
+  const nickname = uidToNickname.get(uid);
+  if (!nickname) return null;
+  return trackedClients.get(nickname) || null;
+}
+
+/**
+ * Resolve the full nickname for a (possibly truncated) player name.
+ * Tries: exact match → UID lookup → prefix match (for truncated names like "Marlito Sorc...").
+ */
+export function resolveFullNickname(displayName: string, uid?: string): string {
+  // 1. Exact match in tracker
+  const exact = getTrackedClient(displayName);
+  if (exact) return exact.nickname;
+
+  // 2. UID-based lookup (most reliable for truncated names)
+  if (uid) {
+    const byUid = getTrackedClientByUid(uid);
+    if (byUid) return byUid.nickname;
+  }
+
+  // 3. Prefix match: "Marlito Sorc..." → "Marlito Sorcerer"
+  const cleanName = displayName.replace(/\.{2,}$/, "").trim();
+  if (cleanName.length >= 5 && cleanName !== displayName) {
+    const lower = cleanName.toLowerCase();
+    for (const [key] of trackedClients) {
+      if (key.toLowerCase().startsWith(lower)) return key;
+    }
+  }
+
+  return displayName;
 }
 
 /**
@@ -100,17 +140,24 @@ async function pollClients(): Promise<void> {
     for (const client of clients) {
       seenNicknames.add(client.nickname);
 
+      // Update UID map
+      if (client.uid) {
+        uidToNickname.set(client.uid, client.nickname);
+      }
+
       const existing = trackedClients.get(client.nickname);
       if (existing) {
         // Update connection info (channel may change)
         existing.clid = client.clid;
         existing.cid = client.cid;
+        existing.uid = client.uid || existing.uid;
         existing.lastSeen = now;
       } else {
         // New client - create entry and queue lookup
         trackedClients.set(client.nickname, {
           nickname: client.nickname,
           charName: client.nickname, // placeholder until lookup
+          uid: client.uid || "",
           clid: client.clid,
           cid: client.cid,
           tibiaData: null,
@@ -129,6 +176,7 @@ async function pollClients(): Promise<void> {
     const staleThreshold = now.getTime() - STALE_THRESHOLD_MS;
     for (const [nickname, client] of trackedClients) {
       if (!seenNicknames.has(nickname) && client.lastSeen.getTime() < staleThreshold) {
+        if (client.uid) uidToNickname.delete(client.uid);
         trackedClients.delete(nickname);
       }
     }

@@ -803,10 +803,13 @@ public class TS3Bridge {
                 int clientType = cl.getInt("client_type");
                 if (clientType == 1) continue;
 
+                String uid = "";
+                try { uid = cl.getUniqueIdentifier(); } catch (Exception ignored) {}
                 clients.add(jsonObj(
                     "clid", cl.getId(),
                     "cid", cl.getChannelId(),
                     "nickname", cl.getNickname(),
+                    "uid", uid != null ? uid : "",
                     "client_type", clientType
                 ));
             }
@@ -841,6 +844,7 @@ public class TS3Bridge {
                 "clid", clid,
                 "cid", cidVal,
                 "nickname", safe(cl.get("client_nickname")),
+                "uid", safe(cl.get("client_unique_identifier")),
                 "client_type", clientType
             ));
         }
