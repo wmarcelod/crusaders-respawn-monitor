@@ -91,6 +91,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_history_started ON respawn_history(started_at);
   CREATE INDEX IF NOT EXISTS idx_queue_history_code ON queue_history(code);
   CREATE INDEX IF NOT EXISTS idx_player_stats_player ON player_stats(player_name);
+
+  CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_clid INTEGER,
+    from_name TEXT NOT NULL,
+    from_uid TEXT,
+    message TEXT NOT NULL,
+    target_mode TEXT DEFAULT 'channel',
+    channel_name TEXT,
+    timestamp TEXT DEFAULT (datetime('now', 'localtime')),
+    is_bot INTEGER DEFAULT 0,
+    is_command INTEGER DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chat_timestamp ON chat_messages(timestamp);
+  CREATE INDEX IF NOT EXISTS idx_chat_from ON chat_messages(from_name);
+  CREATE INDEX IF NOT EXISTS idx_chat_bot ON chat_messages(is_bot);
 `);
 
 // --- Prepared statements ---
@@ -174,6 +191,36 @@ const stmts = {
   insertQueueEntry: db.prepare(`
     INSERT INTO queue_history (code, position, player_name, player_uid, claim_minutes)
     VALUES (@code, @position, @playerName, @playerUid, @claimMinutes)
+  `),
+
+  // Chat messages
+  insertChatMessage: db.prepare(`
+    INSERT INTO chat_messages (from_clid, from_name, from_uid, message, target_mode, channel_name, timestamp, is_bot, is_command)
+    VALUES (@fromClid, @fromName, @fromUid, @message, @targetMode, @channelName, @timestamp, @isBot, @isCommand)
+  `),
+
+  getChatMessages: db.prepare(`
+    SELECT * FROM chat_messages ORDER BY timestamp DESC LIMIT ?
+  `),
+
+  getChatMessagesByDate: db.prepare(`
+    SELECT * FROM chat_messages WHERE timestamp >= @from AND timestamp <= @to ORDER BY timestamp ASC
+  `),
+
+  getChatMessagesByPlayer: db.prepare(`
+    SELECT * FROM chat_messages WHERE from_name = ? ORDER BY timestamp DESC LIMIT 100
+  `),
+
+  getChatStats: db.prepare(`
+    SELECT from_name, COUNT(*) as msg_count FROM chat_messages GROUP BY from_name ORDER BY msg_count DESC LIMIT 50
+  `),
+
+  getHistoryByDateRange: db.prepare(`
+    SELECT * FROM respawn_history WHERE started_at >= @from AND started_at <= @to ORDER BY started_at ASC
+  `),
+
+  getChatByDateRange: db.prepare(`
+    SELECT * FROM chat_messages WHERE timestamp >= @from AND timestamp <= @to ORDER BY timestamp ASC
   `),
 };
 
@@ -432,13 +479,84 @@ export function getRecentChanges(): any[] {
   return stmts.getRecentHistory.all() as any[];
 }
 
+/** Save a chat message */
+export function saveChatMessage(msg: {
+  fromClid: number;
+  fromName: string;
+  fromUid: string;
+  message: string;
+  targetMode?: string;
+  channelName?: string;
+  timestamp?: string;
+  isBot?: boolean;
+  isCommand?: boolean;
+}): void {
+  stmts.insertChatMessage.run({
+    fromClid: msg.fromClid,
+    fromName: msg.fromName,
+    fromUid: msg.fromUid || "",
+    message: msg.message,
+    targetMode: msg.targetMode || "channel",
+    channelName: msg.channelName || "",
+    timestamp: msg.timestamp || new Date().toISOString().replace("T", " ").substring(0, 19),
+    isBot: msg.isBot ? 1 : 0,
+    isCommand: msg.isCommand ? 1 : 0,
+  });
+}
+
+/** Save batch of chat messages */
+export function saveChatMessages(msgs: Array<{
+  fromClid: number;
+  fromName: string;
+  fromUid: string;
+  message: string;
+  targetMode?: string;
+  channelName?: string;
+  timestamp?: string;
+  isBot?: boolean;
+  isCommand?: boolean;
+}>): void {
+  const tx = db.transaction(() => {
+    for (const msg of msgs) {
+      saveChatMessage(msg);
+    }
+  });
+  tx();
+}
+
+/** Get recent chat messages */
+export function getChatMessages(limit: number = 100): any[] {
+  return stmts.getChatMessages.all(limit) as any[];
+}
+
+/** Get chat messages by date range */
+export function getChatMessagesByDate(from: string, to: string): any[] {
+  return stmts.getChatMessagesByDate.all({ from, to }) as any[];
+}
+
+/** Get respawn history for a date range */
+export function getHistoryByDateRange(from: string, to: string): any[] {
+  return stmts.getHistoryByDateRange.all({ from, to }) as any[];
+}
+
+/** Get chat messages by player */
+export function getChatMessagesByPlayer(name: string): any[] {
+  return stmts.getChatMessagesByPlayer.all(name) as any[];
+}
+
+/** Get chat statistics (top chatters) */
+export function getChatStats(): any[] {
+  return stmts.getChatStats.all() as any[];
+}
+
 /** Get DB stats */
-export function getDBStats(): { respawns: number; queueEntries: number; historyEntries: number; players: number } {
+export function getDBStats(): { respawns: number; queueEntries: number; historyEntries: number; players: number; chatMessages: number } {
   const respawns = (db.prepare("SELECT COUNT(*) as c FROM respawn_state").get() as any).c;
   const queueEntries = (db.prepare("SELECT COUNT(*) as c FROM queue_cache").get() as any).c;
   const historyEntries = (db.prepare("SELECT COUNT(*) as c FROM respawn_history").get() as any).c;
   const players = (db.prepare("SELECT COUNT(DISTINCT player_name) as c FROM player_stats").get() as any).c;
-  return { respawns, queueEntries, historyEntries, players };
+  const chatMessages = (db.prepare("SELECT COUNT(*) as c FROM chat_messages").get() as any).c;
+  return { respawns, queueEntries, historyEntries, players, chatMessages };
 }
 
 export default db;

@@ -20,7 +20,7 @@ import {
 } from "./sheets-parser";
 import { findReservationsForRespawnByCode, matchRespawnName } from "./respawn-matcher";
 import { queryRespInfo, RespInfoResult, parseRespInfoMessages } from "./bot-client";
-import { saveRespawnState, saveQueueInfo, getLastKnownState, getCachedQueueFromDB, updateHistory, getDBStats } from "./database";
+import { saveRespawnState, saveQueueInfo, getLastKnownState, getCachedQueueFromDB, updateHistory, getDBStats, saveChatMessages, getChatMessages, getChatMessagesByDate, getChatStats, getHistoryByDateRange } from "./database";
 import { processSnapshot, getLogStats, getPlayerProfile, getRespawnHistory, getPlayerRespawnHistory, RespawnLogEntry, PlayerProfile } from "./respawn-logger";
 import { fetchCharacter, fetchCharacterFull, fetchCharacters, extractCharNames, shortVocation, TibiaCharacter, TibiaCharacterFull } from "./tibia-api";
 import { startClientTracker, getTrackedClients, getTrackedClient, resolveFullNickname } from "./client-tracker";
@@ -207,6 +207,46 @@ async function fetchPlayerDataCached(names: string[]): Promise<Map<string, Tibia
   } catch (err: any) {
     console.error("fetchPlayerDataCached error:", err?.message || err);
     return cachedPlayerData;
+  }
+}
+
+// --- Chat message poller: periodically fetch messages from bridge and store in DB ---
+const CHAT_POLL_INTERVAL = 5_000; // 5 seconds
+
+async function pollBridgeMessages(): Promise<void> {
+  try {
+    const bridgeUrl = process.env.BRIDGE_URL || "http://localhost:8080";
+    const raw = await new Promise<string>((resolve, reject) => {
+      http.get(`${bridgeUrl}/api/messages`, (resp) => {
+        let data = "";
+        resp.on("data", (chunk: Buffer) => data += chunk);
+        resp.on("end", () => resolve(data));
+      }).on("error", reject);
+    });
+    const messages = JSON.parse(raw) as Array<{
+      from_clid: number;
+      from_name: string;
+      from_uid: string;
+      message: string;
+      timestamp: number;
+    }>;
+
+    if (messages.length > 0) {
+      const botUid = process.env.BOT_UID || "";
+      saveChatMessages(messages.map(m => ({
+        fromClid: m.from_clid,
+        fromName: m.from_name,
+        fromUid: m.from_uid,
+        message: m.message,
+        targetMode: "channel",
+        timestamp: new Date(m.timestamp * 1000).toISOString().replace("T", " ").substring(0, 19),
+        isBot: m.from_uid === botUid,
+        isCommand: m.message.startsWith("!"),
+      })));
+      console.log(`[Chat] Stored ${messages.length} messages`);
+    }
+  } catch {
+    // Silent fail - bridge may be offline
   }
 }
 
@@ -411,6 +451,7 @@ function renderHTML(
 
       return `
       <tr class="${rowClass}" data-code="${escapeHtml(e.code)}" data-respawn="${escapeHtml(e.name)}" data-player="${escapeHtml(fullName)}" data-voc="${vocClass}" data-level="${level}" data-remaining="${e.remainingMinutes}" data-exit="${freeAt}">
+        <td><span class="fav-star" data-code="${escapeHtml(e.code)}" onclick="toggleFavorite('${escapeHtml(e.code)}')">★</span></td>
         <td class="code"><a href="/respawn/${encodeURIComponent(e.code)}" class="respawn-link">${escapeHtml(e.code)}</a></td>
         <td class="respawn-name"><a href="/respawn/${encodeURIComponent(e.code)}" class="respawn-link">${escapeHtml(e.name)}</a></td>
         <td class="player-cell">${playerHtml}</td>
@@ -769,6 +810,18 @@ function renderHTML(
     .clickable { cursor: pointer; }
     .clickable:hover { filter: brightness(1.3); }
 
+    .fav-star { cursor: pointer; font-size: 1.1em; opacity: 0.3; transition: opacity 0.2s; user-select: none; }
+    .fav-star:hover { opacity: 0.8; }
+    .fav-star.active { opacity: 1; color: #fbbf24; }
+    .fav-filter-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .fav-filter-btn { background: #1e2030; color: #818cf8; border: 1px solid #2e3150; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.8em; }
+    .fav-filter-btn:hover { background: #2e3150; }
+    .fav-filter-btn.active { background: #312e81; border-color: #818cf8; }
+    .nav-links { display: flex; gap: 12px; margin-top: 8px; }
+    .nav-link { color: #818cf8; text-decoration: none; font-size: 0.85em; padding: 4px 12px; border: 1px solid #2e3150; border-radius: 8px; background: #1e2030; }
+    .nav-link:hover { background: #2e3150; text-decoration: none; }
+    .nav-link.current { background: #312e81; border-color: #818cf8; }
+
     .refresh-btn {
       background: #1e2030;
       color: #818cf8;
@@ -1062,7 +1115,13 @@ function renderHTML(
 <body>
   <div class="container">
     <header>
-      <h1><span>Crusaders</span> Respawn Monitor</h1>
+      <div>
+        <h1><span>Crusaders</span> Respawn Monitor</h1>
+        <div class="nav-links">
+          <a href="/" class="nav-link current">Dashboard</a>
+          <a href="/agenda" class="nav-link">Agenda</a>
+        </div>
+      </div>
       <div class="header-actions">
         <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()" title="Alternar tema claro/escuro">
           <span id="themeIcon">&#9728;</span>
@@ -1104,6 +1163,7 @@ function renderHTML(
     <div class="section-title">Respawns Ocupados <span class="count">${data.totalRespawns}</span></div>
 
     <div class="filter-bar">
+      <button class="fav-filter-btn" id="favFilterBtn" onclick="toggleFavFilter()">★ Favoritos</button>
       <input type="text" id="searchFilter" placeholder="Buscar jogador ou respawn..." class="search-input">
       <div class="voc-filters">
         <button class="voc-filter-btn active" data-voc="all">Todos</button>
@@ -1115,9 +1175,10 @@ function renderHTML(
       <input type="hidden" id="sortSelect" value="code">
     </div>
 
-    <table>
+    <table id="respawnTable">
       <thead>
         <tr>
+          <th style="width:30px">★</th>
           <th class="sortable" data-sort="code">Code <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="respawn">Respawn <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="player">Jogador <span class="sort-arrow"></span></th>
@@ -1128,7 +1189,7 @@ function renderHTML(
         </tr>
       </thead>
       <tbody>
-        ${rows || '<tr><td colspan="7" style="text-align:center;padding:40px;color:#52525b;">Nenhum respawn ocupado</td></tr>'}
+        ${rows || '<tr><td colspan="8" style="text-align:center;padding:40px;color:#52525b;">Nenhum respawn ocupado</td></tr>'}
       </tbody>
     </table>
 
@@ -1479,6 +1540,49 @@ function renderHTML(
     // Restore state from previous page load, then start auto-refresh
     restoreState();
     scheduleRefresh();
+
+    // --- Favorites ---
+    function getFavorites() {
+      try { return JSON.parse(localStorage.getItem('respawnFavorites') || '[]'); } catch(e) { return []; }
+    }
+    function saveFavorites(favs) {
+      localStorage.setItem('respawnFavorites', JSON.stringify(favs));
+    }
+    function toggleFavorite(code) {
+      var favs = getFavorites();
+      var idx = favs.indexOf(code);
+      if (idx >= 0) favs.splice(idx, 1);
+      else favs.push(code);
+      saveFavorites(favs);
+      updateFavStars();
+    }
+    function updateFavStars() {
+      var favs = getFavorites();
+      document.querySelectorAll('.fav-star').forEach(function(el) {
+        el.classList.toggle('active', favs.includes(el.dataset.code));
+      });
+    }
+    var favFilterActive = false;
+    function toggleFavFilter() {
+      favFilterActive = !favFilterActive;
+      document.getElementById('favFilterBtn').classList.toggle('active', favFilterActive);
+      applyFavFilter();
+    }
+    function applyFavFilter() {
+      if (!favFilterActive) {
+        document.querySelectorAll('#respawnTable tbody tr').forEach(function(r) {
+          r.style.display = '';
+        });
+        applyFilters(); // reapply other filters
+        return;
+      }
+      var favs = getFavorites();
+      document.querySelectorAll('#respawnTable tbody tr').forEach(function(r) {
+        var code = r.dataset.code;
+        r.style.display = favs.includes(code) ? '' : 'none';
+      });
+    }
+    updateFavStars();
   </script>
 </body>
 </html>`;
@@ -2650,6 +2754,261 @@ function renderPlayerDetailHTML(
 </html>`;
 }
 
+function renderAgendaHTML(): string {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crusaders - Agenda</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #0b0d17; color: #d4d4d8; min-height: 100vh; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid #1e2030; margin-bottom: 24px; }
+    h1 { font-size: 1.5em; font-weight: 700; color: #f4f4f5; }
+    h1 span { color: #818cf8; }
+    .nav-links { display: flex; gap: 12px; margin-top: 8px; }
+    .nav-link { color: #818cf8; text-decoration: none; font-size: 0.85em; padding: 4px 12px; border: 1px solid #2e3150; border-radius: 8px; background: #1e2030; }
+    .nav-link:hover { background: #2e3150; }
+    .nav-link.current { background: #312e81; border-color: #818cf8; }
+    .date-nav { display: flex; gap: 12px; align-items: center; margin-bottom: 24px; }
+    .date-nav button { background: #1e2030; color: #818cf8; border: 1px solid #2e3150; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.9em; }
+    .date-nav button:hover { background: #2e3150; }
+    .date-nav input[type="date"] { background: #111322; color: #d4d4d8; border: 1px solid #2e3150; padding: 8px 12px; border-radius: 8px; font-family: inherit; }
+    .date-label { font-size: 1.2em; font-weight: 600; color: #f4f4f5; min-width: 180px; text-align: center; }
+    .timeline { position: relative; margin-top: 20px; }
+    .timeline-section { margin-bottom: 32px; }
+    .timeline-section h3 { color: #a1a1aa; font-size: 0.9em; font-weight: 600; text-transform: uppercase; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #1e2030; }
+    .timeline-item { display: flex; gap: 12px; padding: 10px 16px; margin-bottom: 4px; background: #111322; border-radius: 8px; border-left: 3px solid #818cf8; align-items: flex-start; }
+    .timeline-item.chat { border-left-color: #34d399; }
+    .timeline-item.bot { border-left-color: #fbbf24; }
+    .timeline-item.exit { border-left-color: #f87171; }
+    .timeline-item.entry { border-left-color: #60a5fa; }
+    .tl-time { color: #71717a; font-size: 0.8em; font-family: monospace; min-width: 50px; padding-top: 2px; }
+    .tl-content { flex: 1; }
+    .tl-player { color: #a78bfa; font-weight: 500; }
+    .tl-respawn { color: #818cf8; }
+    .tl-msg { color: #d4d4d8; font-size: 0.9em; word-break: break-word; }
+    .tl-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.7em; font-weight: 600; margin-left: 6px; }
+    .tl-tag.entry-tag { background: #1e3a5f; color: #7dd3fc; }
+    .tl-tag.exit-tag { background: #5f1e1e; color: #fca5a5; }
+    .tl-tag.chat-tag { background: #1e3a2e; color: #86efac; }
+    .tl-tag.bot-tag { background: #3a351e; color: #fde68a; }
+    .tl-tag.cmd-tag { background: #2e1e3a; color: #d8b4fe; }
+    .empty-state { text-align: center; padding: 60px 20px; color: #52525b; }
+    .empty-state .icon { font-size: 3em; margin-bottom: 12px; }
+    .stats-bar { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+    .agenda-stat { background: #111322; border: 1px solid #1e2030; border-radius: 8px; padding: 10px 16px; }
+    .agenda-stat .label { font-size: 0.7em; color: #71717a; }
+    .agenda-stat .value { font-size: 1.3em; font-weight: 700; color: #818cf8; }
+    .filter-toggles { display: flex; gap: 8px; margin-bottom: 16px; }
+    .filter-toggle { background: #1e2030; color: #d4d4d8; border: 1px solid #2e3150; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 0.8em; }
+    .filter-toggle:hover { background: #2e3150; }
+    .filter-toggle.active { background: #312e81; border-color: #818cf8; color: #818cf8; }
+    #loading { text-align: center; padding: 40px; color: #71717a; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1><span>Crusaders</span> Agenda</h1>
+        <div class="nav-links">
+          <a href="/" class="nav-link">Dashboard</a>
+          <a href="/agenda" class="nav-link current">Agenda</a>
+        </div>
+      </div>
+    </header>
+
+    <div class="date-nav">
+      <button onclick="changeDate(-1)">&larr; Anterior</button>
+      <input type="date" id="datePicker" onchange="loadDate(this.value)">
+      <span class="date-label" id="dateLabel"></span>
+      <button onclick="changeDate(1)">Proximo &rarr;</button>
+      <button onclick="loadDate(new Date().toISOString().split('T')[0])">Hoje</button>
+    </div>
+
+    <div class="stats-bar" id="statsBar"></div>
+
+    <div class="filter-toggles">
+      <button class="filter-toggle active" data-type="entry" onclick="toggleFilter(this)">Entradas</button>
+      <button class="filter-toggle active" data-type="exit" onclick="toggleFilter(this)">Saidas</button>
+      <button class="filter-toggle active" data-type="chat" onclick="toggleFilter(this)">Chat</button>
+      <button class="filter-toggle active" data-type="bot" onclick="toggleFilter(this)">Bot</button>
+    </div>
+
+    <div id="loading">Carregando...</div>
+    <div class="timeline" id="timeline" style="display:none"></div>
+  </div>
+
+  <script>
+    let currentDate = new Date().toISOString().split('T')[0];
+    const filters = { entry: true, exit: true, chat: true, bot: true };
+    let allItems = [];
+
+    function formatDateBR(dateStr) {
+      const [y, m, d] = dateStr.split('-');
+      const days = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
+      const dt = new Date(dateStr + 'T12:00:00');
+      return days[dt.getDay()] + ', ' + d + '/' + m + '/' + y;
+    }
+
+    function changeDate(delta) {
+      const d = new Date(currentDate + 'T12:00:00');
+      d.setDate(d.getDate() + delta);
+      loadDate(d.toISOString().split('T')[0]);
+    }
+
+    async function loadDate(dateStr) {
+      currentDate = dateStr;
+      document.getElementById('datePicker').value = dateStr;
+      document.getElementById('dateLabel').textContent = formatDateBR(dateStr);
+      document.getElementById('loading').style.display = 'block';
+      document.getElementById('timeline').style.display = 'none';
+
+      try {
+        const res = await fetch('/api/agenda?date=' + dateStr);
+        const data = await res.json();
+        processData(data);
+      } catch (err) {
+        document.getElementById('loading').textContent = 'Erro ao carregar: ' + err.message;
+      }
+    }
+
+    function processData(data) {
+      allItems = [];
+
+      // Process respawn history entries
+      for (const h of data.history) {
+        if (h.started_at) {
+          allItems.push({
+            time: h.started_at,
+            type: 'entry',
+            player: h.occupied_by || '',
+            respawn: (h.code || '') + ' ' + (h.name || ''),
+            code: h.code || '',
+            detail: '',
+          });
+        }
+        if (h.ended_at) {
+          const dur = h.duration_minutes || 0;
+          allItems.push({
+            time: h.ended_at,
+            type: 'exit',
+            player: h.occupied_by || '',
+            respawn: (h.code || '') + ' ' + (h.name || ''),
+            code: h.code || '',
+            detail: dur > 0 ? dur + 'min' : '',
+          });
+        }
+      }
+
+      // Process chat messages
+      for (const m of data.chat) {
+        const isBot = m.is_bot === 1;
+        const isCmd = m.is_command === 1;
+        allItems.push({
+          time: m.timestamp,
+          type: isBot ? 'bot' : 'chat',
+          player: m.from_name || '',
+          respawn: '',
+          code: '',
+          detail: m.message || '',
+          isCmd: isCmd,
+        });
+      }
+
+      // Sort by time
+      allItems.sort((a, b) => a.time.localeCompare(b.time));
+
+      // Stats
+      const entries = allItems.filter(i => i.type === 'entry').length;
+      const exits = allItems.filter(i => i.type === 'exit').length;
+      const chats = allItems.filter(i => i.type === 'chat').length;
+      const bots = allItems.filter(i => i.type === 'bot').length;
+      const uniquePlayers = new Set(allItems.filter(i => i.type === 'entry').map(i => i.player)).size;
+      const uniqueRespawns = new Set(allItems.filter(i => i.type === 'entry').map(i => i.code)).size;
+
+      document.getElementById('statsBar').innerHTML =
+        '<div class="agenda-stat"><div class="label">Entradas</div><div class="value">' + entries + '</div></div>' +
+        '<div class="agenda-stat"><div class="label">Saidas</div><div class="value">' + exits + '</div></div>' +
+        '<div class="agenda-stat"><div class="label">Mensagens</div><div class="value">' + chats + '</div></div>' +
+        '<div class="agenda-stat"><div class="label">Bot</div><div class="value">' + bots + '</div></div>' +
+        '<div class="agenda-stat"><div class="label">Jogadores</div><div class="value">' + uniquePlayers + '</div></div>' +
+        '<div class="agenda-stat"><div class="label">Respawns</div><div class="value">' + uniqueRespawns + '</div></div>';
+
+      renderTimeline();
+    }
+
+    function renderTimeline() {
+      const filtered = allItems.filter(i => filters[i.type]);
+      const tl = document.getElementById('timeline');
+
+      if (filtered.length === 0) {
+        tl.innerHTML = '<div class="empty-state"><div class="icon">📋</div><p>Nenhum evento encontrado para este dia.</p></div>';
+        tl.style.display = 'block';
+        document.getElementById('loading').style.display = 'none';
+        return;
+      }
+
+      // Group by hour
+      const hours = {};
+      for (const item of filtered) {
+        const h = item.time.substring(11, 13) || '00';
+        if (!hours[h]) hours[h] = [];
+        hours[h].push(item);
+      }
+
+      let html = '';
+      for (const h of Object.keys(hours).sort()) {
+        html += '<div class="timeline-section"><h3>' + h + ':00</h3>';
+        for (const item of hours[h]) {
+          const time = item.time.substring(11, 16) || '';
+          let cls = 'timeline-item ' + item.type;
+          let content = '';
+
+          if (item.type === 'entry') {
+            content = '<span class="tl-player">' + esc(item.player) + '</span> entrou em <span class="tl-respawn">' + esc(item.respawn) + '</span><span class="tl-tag entry-tag">ENTRADA</span>';
+          } else if (item.type === 'exit') {
+            content = '<span class="tl-player">' + esc(item.player) + '</span> saiu de <span class="tl-respawn">' + esc(item.respawn) + '</span>' + (item.detail ? ' (' + esc(item.detail) + ')' : '') + '<span class="tl-tag exit-tag">SAIDA</span>';
+          } else if (item.type === 'chat') {
+            const tag = item.isCmd ? '<span class="tl-tag cmd-tag">CMD</span>' : '<span class="tl-tag chat-tag">CHAT</span>';
+            content = '<span class="tl-player">' + esc(item.player) + '</span>: <span class="tl-msg">' + esc(item.detail) + '</span>' + tag;
+          } else if (item.type === 'bot') {
+            content = '<span class="tl-player">' + esc(item.player) + '</span>: <span class="tl-msg">' + esc(item.detail.substring(0, 200)) + '</span><span class="tl-tag bot-tag">BOT</span>';
+          }
+
+          html += '<div class="' + cls + '"><span class="tl-time">' + time + '</span><div class="tl-content">' + content + '</div></div>';
+        }
+        html += '</div>';
+      }
+
+      tl.innerHTML = html;
+      tl.style.display = 'block';
+      document.getElementById('loading').style.display = 'none';
+    }
+
+    function toggleFilter(btn) {
+      const type = btn.dataset.type;
+      filters[type] = !filters[type];
+      btn.classList.toggle('active', filters[type]);
+      renderTimeline();
+    }
+
+    function esc(s) {
+      if (!s) return '';
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // Init
+    loadDate(currentDate);
+  </script>
+</body>
+</html>`;
+}
+
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -2881,6 +3240,42 @@ async function handleRequest(
       return;
     }
 
+    if (url === "/api/agenda" || url.startsWith("/api/agenda?")) {
+      const urlObj = new URL(url, "http://localhost");
+      const dateStr = urlObj.searchParams.get("date") || new Date().toISOString().split("T")[0];
+      const from = dateStr + " 00:00:00";
+      const to = dateStr + " 23:59:59";
+      const history = getHistoryByDateRange(from, to);
+      const chat = getChatMessagesByDate(from, to);
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ date: dateStr, history, chat }));
+      return;
+    }
+
+    // --- Chat API ---
+    if (url === "/api/chat/messages" || url.startsWith("/api/chat/messages?")) {
+      const parsedUrl = new URL(url, `http://localhost:${WEB_PORT}`);
+      const limit = parseInt(parsedUrl.searchParams.get("limit") || "100");
+      const from = parsedUrl.searchParams.get("from");
+      const to = parsedUrl.searchParams.get("to");
+
+      let messages;
+      if (from && to) {
+        messages = getChatMessagesByDate(from, to);
+      } else {
+        messages = getChatMessages(limit);
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify(messages));
+      return;
+    }
+    if (url === "/api/chat/stats") {
+      res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify(getChatStats()));
+      return;
+    }
+
     if (url === "/api/respawns") {
       const { respawns, reservations, activeReservations } = await fetchAllData();
       res.writeHead(200, {
@@ -2894,6 +3289,14 @@ async function handleRequest(
           2
         )
       );
+      return;
+    }
+
+    // Agenda page: /agenda
+    if (url === "/agenda" || url.startsWith("/agenda?")) {
+      const html = renderAgendaHTML();
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
       return;
     }
 
@@ -3038,6 +3441,9 @@ async function main(): Promise<void> {
 
   // Start background client tracker (polls TS for connected users)
   startClientTracker();
+
+  // Start chat message poller (fetches messages from bridge and stores in DB)
+  setInterval(pollBridgeMessages, CHAT_POLL_INTERVAL);
 
   server.listen(WEB_PORT, () => {
     console.log("Crusaders Respawn Monitor");
