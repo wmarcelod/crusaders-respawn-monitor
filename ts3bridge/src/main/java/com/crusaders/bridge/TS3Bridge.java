@@ -6,15 +6,10 @@ import com.github.manevolent.ts3j.identity.LocalIdentity;
 import com.github.manevolent.ts3j.event.*;
 import com.github.manevolent.ts3j.api.Channel;
 import com.github.manevolent.ts3j.api.Client;
-import com.github.manevolent.ts3j.command.SingleCommand;
-import com.github.manevolent.ts3j.command.parameter.CommandSingleParameter;
-import com.github.manevolent.ts3j.protocol.ProtocolRole;
 import com.google.gson.Gson;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.Headers;
-
-import com.github.manevolent.ts3j.util.Ts3Debugging;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -134,7 +129,6 @@ public class TS3Bridge {
     // ========== CHANNEL CACHE ==========
 
     private static void mergeChannelEvent(String source, int channelId, Map<String, String> update) {
-        log("[Cache] " + source + " cid=" + channelId + " keys=" + update.keySet());
         channelCache.compute(channelId, (_key, existing) -> {
             ConcurrentHashMap<String, String> merged = existing == null
                     ? new ConcurrentHashMap<>()
@@ -204,24 +198,11 @@ public class TS3Bridge {
     }
 
     /**
-     * Sync channel list from the server using listChannels().
-     * Note: listChannels() may not work reliably because the "channellist" named
-     * processor intercepts the response. The initial channel data comes from
-     * onChannelList events during connection.
+     * Periodic sync: refresh channel descriptions via channelinfo.
+     * Channel names come from onChannelList events during initial connection.
+     * listChannels() doesn't work reliably (named processor intercepts response).
      */
-    private static void syncChannelList() {
-        if (tsClient == null || tsClient.getState() != ClientConnectionState.CONNECTED) return;
-        try {
-            int count = 0;
-            for (Channel channel : tsClient.listChannels()) {
-                count++;
-                mergeChannelEvent("syncChannelList", channel.getId(), channel.getMap());
-            }
-            log("[Bridge] Synced " + count + " channels into cache");
-        } catch (Exception ex) {
-            log("[Bridge] syncChannelList failed: " + ex.getMessage());
-        }
-        // After syncing channel list, fetch descriptions
+    private static void syncChannels() {
         fetchAllDescriptions();
     }
 
@@ -269,7 +250,7 @@ public class TS3Bridge {
                     // Schedule initial sync after connection stabilizes
                     // syncChannelList already calls fetchAllDescriptions at the end
                     scheduler.schedule(() -> {
-                        syncChannelList();
+                        syncChannels();
                         syncClientList();
                     }, 3, TimeUnit.SECONDS);
                 }
@@ -386,7 +367,7 @@ public class TS3Bridge {
         // Periodic channel/client cache refresh
         scheduler.scheduleAtFixedRate(() -> {
             if (connected) {
-                syncChannelList();
+                syncChannels();
                 syncClientList();
             }
         }, 30, 30, TimeUnit.SECONDS);
