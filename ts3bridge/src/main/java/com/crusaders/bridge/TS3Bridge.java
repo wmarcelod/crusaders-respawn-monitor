@@ -834,9 +834,82 @@ public class TS3Bridge {
             return;
         }
         String uid = java.net.URLDecoder.decode(path.substring(prefix.length()), StandardCharsets.UTF_8);
-        log("[Debug] resolveUidToClid test for: " + uid);
-        int clid = resolveUidToClid(uid);
-        sendJson(ex, 200, jsonObj("uid", uid, "clid", clid, "found", clid > 0));
+        log("[Debug] resolve test for: " + uid);
+
+        // Test multiple approaches to find the client
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("uid", uid);
+
+        // Approach 1: clientgetids
+        int clid1 = resolveUidToClid(uid);
+        result.put("clientgetids_clid", clid1);
+
+        // Approach 2: listClients with UID matching
+        int clid2 = -1;
+        String nickname2 = null;
+        try {
+            synchronized (commandLock) {
+                for (com.github.manevolent.ts3j.api.Client cl : tsClient.listClients()) {
+                    String cuid = cl.getUniqueIdentifier();
+                    if (uid.equals(cuid)) {
+                        clid2 = cl.getId();
+                        nickname2 = cl.getNickname();
+                        break;
+                    }
+                }
+            }
+        } catch (Exception ex2) {
+            result.put("listClients_error", ex2.getMessage());
+        }
+        result.put("listClients_clid", clid2);
+        result.put("listClients_nickname", nickname2);
+
+        // Approach 3: clientfind by common bot names
+        int clid3 = -1;
+        try {
+            synchronized (commandLock) {
+                for (String pattern : new String[]{"CrusaderBot", "ExptoBotModify", "Crusader"}) {
+                    try {
+                        SingleCommand cmd = new SingleCommand("clientfind", ProtocolRole.CLIENT,
+                            new CommandSingleParameter("pattern", pattern));
+                        Iterable<SingleCommand> results2 = tsClient.executeCommand(cmd).get();
+                        for (SingleCommand r : results2) {
+                            Map<String, String> m = r.toMap();
+                            log("[Debug] clientfind '" + pattern + "': " + m);
+                            if (clid3 < 0 && m.get("clid") != null) {
+                                clid3 = Integer.parseInt(m.get("clid"));
+                            }
+                        }
+                    } catch (Exception ignored) {
+                        log("[Debug] clientfind '" + pattern + "' failed: " + ignored.getMessage());
+                    }
+                    Thread.sleep(100);
+                }
+            }
+        } catch (Exception ex3) {
+            result.put("clientfind_error", ex3.getMessage());
+        }
+        result.put("clientfind_clid", clid3);
+
+        // Approach 4: search clientCache (from onClientJoin events)
+        int clid4 = -1;
+        String nickname4 = null;
+        for (Map.Entry<Integer, ConcurrentHashMap<String, String>> entry : clientCache.entrySet()) {
+            String cuid = entry.getValue().get("client_unique_identifier");
+            if (uid.equals(cuid)) {
+                clid4 = entry.getKey();
+                nickname4 = entry.getValue().get("client_nickname");
+                break;
+            }
+        }
+        result.put("cache_clid", clid4);
+        result.put("cache_nickname", nickname4);
+
+        boolean found = clid1 > 0 || clid2 > 0 || clid3 > 0 || clid4 > 0;
+        result.put("found", found);
+        result.put("best_clid", clid1 > 0 ? clid1 : clid2 > 0 ? clid2 : clid3 > 0 ? clid3 : clid4);
+
+        sendJson(ex, 200, result);
     }
 
     /**
