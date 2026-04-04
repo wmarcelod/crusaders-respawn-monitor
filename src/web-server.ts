@@ -2430,6 +2430,27 @@ async function handleRequest(
       return;
     }
 
+    // Debug: proxy bridge's raw cache dump
+    if (url === "/api/debug/bridge-cache") {
+      const corsH = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
+      try {
+        const bridgeUrl = process.env.BRIDGE_URL || "http://localhost:8080";
+        const raw = await new Promise<string>((resolve, reject) => {
+          http.get(`${bridgeUrl}/api/debug/cache`, (resp) => {
+            let data = "";
+            resp.on("data", (chunk: Buffer) => data += chunk);
+            resp.on("end", () => resolve(data));
+          }).on("error", reject);
+        });
+        res.writeHead(200, corsH);
+        res.end(raw);
+      } catch (e: any) {
+        res.writeHead(500, corsH);
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
     // Debug: raw channel list from bridge
     if (url === "/api/debug/channels") {
       const corsH = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
