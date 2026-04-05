@@ -27,9 +27,93 @@ import { startClientTracker, getTrackedClients, getTrackedClient, resolveFullNic
 import { getTSConnectionInfo } from "./clientquery";
 // DISABLED: Economy features (will be reworked)
 // import { getTopKilled, getCreatureEconomy, getMarketOverview, getItemHistory, searchItems, fetchKillStatistics } from "./kill-stats";
+import crypto from "crypto";
 import dotenv from "dotenv";
 
 dotenv.config();
+
+// --- Bot command authentication ---
+const BOT_CMD_PASSWORD_HASH = "750ddab3fd9eae404d8ca6c453be9530181f9952e68feb08d8916c6155dc437c"; // SHA-256
+const BOT_UID = process.env.BOT_UID || "JtyuT0YIadDhysblVvprGK/0Ces=";
+
+function verifyBotPassword(password: string): boolean {
+  const hash = crypto.createHash("sha256").update(password).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(BOT_CMD_PASSWORD_HASH, "hex"));
+}
+
+/** Send a command to CrusaderBot via bridge and collect the response */
+async function sendBotCommand(message: string): Promise<{ success: boolean; response: string[] }> {
+  const bridgeUrl = process.env.BRIDGE_URL || "http://ts3bridge:8080";
+
+  function bridgeReq(path: string, method = "GET", body?: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const urlObj = new URL(bridgeUrl + path);
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || 80,
+        path: urlObj.pathname,
+        method,
+        headers: body ? { "Content-Type": "application/json" } : {},
+        timeout: 10000,
+      };
+      const req = http.request(options, (res) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => data += chunk.toString());
+        res.on("end", () => resolve(data));
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+      if (body) req.write(body);
+      req.end();
+    });
+  }
+
+  try {
+    // 1. Clear existing messages
+    await bridgeReq("/api/messages");
+
+    // 2. Send command to bot by UID
+    const sendBody = JSON.stringify({ target_uid: BOT_UID, message });
+    const sendResult = await bridgeReq("/api/message", "POST", sendBody);
+    const sendParsed = JSON.parse(sendResult);
+    if (!sendParsed.success) {
+      return { success: false, response: ["Falha ao enviar comando para o bot"] };
+    }
+
+    // 3. Poll for bot response (up to 8 attempts, 1s apart)
+    const collectedMessages: string[] = [];
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const msgResult = await bridgeReq("/api/messages");
+      const msgs = JSON.parse(msgResult) as Array<{
+        from_clid: number;
+        from_name: string;
+        from_uid: string;
+        message: string;
+        timestamp: number;
+      }>;
+
+      for (const msg of msgs) {
+        if (msg.from_uid === BOT_UID) {
+          collectedMessages.push(msg.message);
+        }
+      }
+
+      // If we got messages and no new ones in last poll, we're done
+      if (collectedMessages.length > 0 && msgs.filter(m => m.from_uid === BOT_UID).length === 0) {
+        break;
+      }
+    }
+
+    return {
+      success: true,
+      response: collectedMessages.length > 0 ? collectedMessages : ["Comando enviado, mas sem resposta do bot"],
+    };
+  } catch (e: any) {
+    console.error("[BotCmd] Bridge request failed:", e?.message || e);
+    return { success: false, response: ["Erro de conexao com o bridge: " + (e?.message || "unknown")] };
+  }
+}
 
 const WEB_PORT = parseInt(process.env.WEB_PORT || "3000");
 
@@ -1005,6 +1089,140 @@ function renderHTML(
 
     .queue-indicator { font-size: 0.65em; color: #818cf8; font-weight: 400; }
 
+    /* Bot Command Modal */
+    .cmd-btn {
+      background: #111322;
+      color: #818cf8;
+      border: 1px solid #2e3150;
+      padding: 8px 14px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 0.85em;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+    .cmd-btn:hover { background: #1e2030; border-color: #818cf8; }
+    .cmd-btn.authed { border-color: #34d399; color: #34d399; }
+
+    #cmdModal .modal { max-width: 440px; }
+
+    .cmd-auth-form { text-align: center; padding: 16px 0; }
+    .cmd-auth-form input {
+      background: #0b0d17;
+      border: 1px solid #2e3150;
+      color: #f4f4f5;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.95em;
+      width: 100%;
+      margin-bottom: 12px;
+      text-align: center;
+    }
+    .cmd-auth-form input:focus { outline: none; border-color: #818cf8; }
+    .cmd-auth-form .auth-error { color: #f87171; font-size: 0.85em; margin-bottom: 8px; display: none; }
+
+    .cmd-form { padding: 8px 0; }
+    .cmd-form label {
+      display: block;
+      color: #71717a;
+      font-size: 0.8em;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+    .cmd-form select, .cmd-form input[type="text"], .cmd-form input[type="time"] {
+      background: #0b0d17;
+      border: 1px solid #2e3150;
+      color: #f4f4f5;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.95em;
+      width: 100%;
+      margin-bottom: 14px;
+      font-family: 'Inter', sans-serif;
+    }
+    .cmd-form select:focus, .cmd-form input:focus { outline: none; border-color: #818cf8; }
+    .cmd-form select option { background: #0b0d17; color: #f4f4f5; }
+
+    .cmd-time-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+    .cmd-time-row > div { flex: 1; }
+    .cmd-time-calc {
+      font-size: 0.85em;
+      color: #34d399;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      padding: 10px 0;
+      text-align: center;
+    }
+    .cmd-time-warn { color: #fbbf24 !important; }
+
+    .cmd-send-btn {
+      background: #312e81;
+      color: #c4b5fd;
+      border: 1px solid #4338ca;
+      padding: 12px 20px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 0.95em;
+      font-weight: 700;
+      width: 100%;
+      transition: all 0.2s;
+      margin-top: 4px;
+    }
+    .cmd-send-btn:hover { background: #3730a3; color: #e0d7fe; }
+    .cmd-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .cmd-send-btn.resp { background: #065f46; color: #6ee7b7; border-color: #059669; }
+    .cmd-send-btn.resp:hover { background: #047857; }
+    .cmd-send-btn.respnext { background: #1e3a5f; color: #93c5fd; border-color: #3b82f6; }
+    .cmd-send-btn.respnext:hover { background: #1e40af; }
+    .cmd-send-btn.respdel { background: #7f1d1d; color: #fca5a5; border-color: #dc2626; }
+    .cmd-send-btn.respdel:hover { background: #991b1b; }
+
+    .cmd-result {
+      margin-top: 14px;
+      background: #0b0d17;
+      border: 1px solid #2e3150;
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82em;
+      color: #a1a1aa;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .cmd-result.success { border-color: #059669; color: #6ee7b7; }
+    .cmd-result.error { border-color: #dc2626; color: #fca5a5; }
+
+    .cmd-loading { text-align: center; padding: 16px; color: #71717a; }
+    .cmd-loading .spinner {
+      display: inline-block;
+      width: 20px; height: 20px;
+      border: 2px solid #2e3150;
+      border-top-color: #818cf8;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 8px;
+    }
+
+    /* Light theme adjustments for cmd modal */
+    body.light .cmd-btn { background: #fff; border-color: #e5e7eb; color: #6366f1; }
+    body.light .cmd-btn:hover { background: #f3f4f6; border-color: #6366f1; }
+    body.light .cmd-btn.authed { border-color: #059669; color: #059669; }
+    body.light .cmd-auth-form input { background: #fff; border-color: #e5e7eb; color: #111827; }
+    body.light .cmd-form select, body.light .cmd-form input { background: #fff; border-color: #e5e7eb; color: #111827; }
+    body.light .cmd-result { background: #fff; border-color: #e5e7eb; color: #6b7280; }
+
     .theme-toggle-btn {
       background: #111322;
       border: 1px solid #2e3150;
@@ -1124,6 +1342,9 @@ function renderHTML(
         </div>
       </div>
       <div class="header-actions">
+        <button class="cmd-btn" id="cmdBtn" onclick="openCmdModal()" title="Enviar comando ao bot">
+          &#9881; Comandos
+        </button>
         <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()" title="Alternar tema claro/escuro">
           <span id="themeIcon">&#9728;</span>
         </button>
@@ -1254,6 +1475,56 @@ function renderHTML(
     </div>
   </div>
 
+  <!-- Bot Command Modal -->
+  <div class="modal-overlay" id="cmdModal" onclick="if(event.target===this)closeCmdModal()">
+    <div class="modal">
+      <h2>&#9881; Comandos do Bot</h2>
+      <div class="modal-code">Enviar comandos para CrusaderBot</div>
+
+      <!-- Auth step -->
+      <div id="cmdAuthStep" class="cmd-auth-form">
+        <p style="color:#71717a;font-size:0.85em;margin-bottom:12px;">Digite a senha para acessar os comandos</p>
+        <div class="auth-error" id="cmdAuthError">Senha incorreta</div>
+        <input type="password" id="cmdPassword" placeholder="Senha..." onkeydown="if(event.key==='Enter')cmdAuthenticate()">
+        <button class="cmd-send-btn" onclick="cmdAuthenticate()">Entrar</button>
+      </div>
+
+      <!-- Command step (hidden until authed) -->
+      <div id="cmdFormStep" class="cmd-form" style="display:none;">
+        <label>Comando</label>
+        <select id="cmdType" onchange="cmdTypeChanged()">
+          <option value="!resp">!resp - Ocupar respawn</option>
+          <option value="!respnext">!respnext - Entrar na fila (proximo)</option>
+          <option value="!respdel">!respdel - Cancelar/remover</option>
+        </select>
+
+        <label>Codigo do Respawn</label>
+        <input type="text" id="cmdCode" placeholder="Ex: ab, rk, lw..." maxlength="4" style="text-transform:uppercase;">
+
+        <div id="cmdTimeSection">
+          <label>Tempo (opcional)</label>
+          <div class="cmd-time-row">
+            <div>
+              <input type="text" id="cmdTimeManual" placeholder="h:mm (ex: 1:30)" maxlength="5">
+            </div>
+            <div style="text-align:center;padding-bottom:14px;color:#52525b;font-size:0.85em;">ou</div>
+            <div>
+              <input type="time" id="cmdTimeUntil" onchange="calcTimeUntil()">
+              <div style="font-size:0.7em;color:#52525b;text-align:center;margin-top:-10px;margin-bottom:10px;">Sair ate...</div>
+            </div>
+          </div>
+          <div class="cmd-time-calc" id="cmdTimeCalc" style="display:none;"></div>
+        </div>
+
+        <button class="cmd-send-btn resp" id="cmdSendBtn" onclick="cmdSend()">Enviar Comando</button>
+
+        <div id="cmdResult" style="display:none;"></div>
+      </div>
+
+      <button class="close-btn" onclick="closeCmdModal()">Fechar</button>
+    </div>
+  </div>
+
   <script>
     var _currentModalCode = '';
     var _currentModalName = '';
@@ -1335,8 +1606,193 @@ function renderHTML(
 
     // Close modal on ESC
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape') closeModal();
+      if (e.key === 'Escape') { closeModal(); closeCmdModal(); }
     });
+
+    // --- Bot Command Modal ---
+    var cmdAuthed = false;
+    var cmdPassword = '';
+
+    function openCmdModal() {
+      var modal = document.getElementById('cmdModal');
+      modal.classList.add('active');
+      if (cmdAuthed) {
+        document.getElementById('cmdAuthStep').style.display = 'none';
+        document.getElementById('cmdFormStep').style.display = 'block';
+      } else {
+        document.getElementById('cmdAuthStep').style.display = 'block';
+        document.getElementById('cmdFormStep').style.display = 'none';
+        setTimeout(function() { document.getElementById('cmdPassword').focus(); }, 100);
+      }
+    }
+
+    function closeCmdModal() {
+      document.getElementById('cmdModal').classList.remove('active');
+    }
+
+    function cmdAuthenticate() {
+      var pw = document.getElementById('cmdPassword').value;
+      if (!pw) return;
+
+      // Validate password with server
+      fetch('/api/bot/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw, command: '!resp', code: '__auth__' })
+      }).then(function(r) {
+        if (r.status === 401) {
+          document.getElementById('cmdAuthError').style.display = 'block';
+          document.getElementById('cmdPassword').value = '';
+          document.getElementById('cmdPassword').focus();
+          return;
+        }
+        // Authed (even if the test request failed for other reasons, password was accepted)
+        cmdAuthed = true;
+        cmdPassword = pw;
+        document.getElementById('cmdAuthStep').style.display = 'none';
+        document.getElementById('cmdFormStep').style.display = 'block';
+        document.getElementById('cmdBtn').classList.add('authed');
+        document.getElementById('cmdAuthError').style.display = 'none';
+        // Clear any previous result
+        document.getElementById('cmdResult').style.display = 'none';
+      }).catch(function() {
+        document.getElementById('cmdAuthError').textContent = 'Erro de conexao';
+        document.getElementById('cmdAuthError').style.display = 'block';
+      });
+    }
+
+    function cmdTypeChanged() {
+      var cmdType = document.getElementById('cmdType').value;
+      var timeSection = document.getElementById('cmdTimeSection');
+      var sendBtn = document.getElementById('cmdSendBtn');
+
+      // Hide time section for respdel
+      timeSection.style.display = cmdType === '!respdel' ? 'none' : 'block';
+
+      // Update button style and text
+      sendBtn.className = 'cmd-send-btn';
+      if (cmdType === '!resp') {
+        sendBtn.classList.add('resp');
+        sendBtn.textContent = 'Ocupar Respawn';
+      } else if (cmdType === '!respnext') {
+        sendBtn.classList.add('respnext');
+        sendBtn.textContent = 'Entrar na Fila';
+      } else {
+        sendBtn.classList.add('respdel');
+        sendBtn.textContent = 'Cancelar / Remover';
+      }
+    }
+
+    function calcTimeUntil() {
+      var timeInput = document.getElementById('cmdTimeUntil').value;
+      var calcDiv = document.getElementById('cmdTimeCalc');
+      var manualInput = document.getElementById('cmdTimeManual');
+
+      if (!timeInput) {
+        calcDiv.style.display = 'none';
+        return;
+      }
+
+      var parts = timeInput.split(':');
+      var targetH = parseInt(parts[0]);
+      var targetM = parseInt(parts[1]);
+
+      var now = new Date();
+      var target = new Date();
+      target.setHours(targetH, targetM, 0, 0);
+
+      // If target is in the past, assume next day
+      if (target <= now) {
+        target.setDate(target.getDate() + 1);
+      }
+
+      var diffMs = target - now;
+      var diffMin = Math.ceil(diffMs / 60000);
+      var h = Math.floor(diffMin / 60);
+      var m = diffMin % 60;
+      var timeStr = h + ':' + String(m).padStart(2, '0');
+
+      calcDiv.style.display = 'block';
+      if (diffMin > 150) {
+        calcDiv.className = 'cmd-time-calc cmd-time-warn';
+        calcDiv.textContent = 'Duracao: ' + timeStr + ' (excede o maximo de 2:30!)';
+        manualInput.value = '2:30';
+      } else if (diffMin < 1) {
+        calcDiv.className = 'cmd-time-calc cmd-time-warn';
+        calcDiv.textContent = 'Horario muito proximo!';
+        manualInput.value = '';
+      } else {
+        calcDiv.className = 'cmd-time-calc';
+        calcDiv.textContent = 'Duracao calculada: ' + timeStr;
+        manualInput.value = timeStr;
+      }
+    }
+
+    function cmdSend() {
+      var cmdType = document.getElementById('cmdType').value;
+      var code = document.getElementById('cmdCode').value.trim().toLowerCase();
+      var time = document.getElementById('cmdTimeManual').value.trim();
+      var resultDiv = document.getElementById('cmdResult');
+      var sendBtn = document.getElementById('cmdSendBtn');
+
+      if (!code) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'cmd-result error';
+        resultDiv.textContent = 'Digite o codigo do respawn';
+        return;
+      }
+
+      // Show loading
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Enviando...';
+      resultDiv.style.display = 'block';
+      resultDiv.className = 'cmd-result';
+      resultDiv.innerHTML = '<div class="cmd-loading"><div class="spinner"></div><div>Enviando para CrusaderBot...</div></div>';
+
+      var payload = {
+        password: cmdPassword,
+        command: cmdType,
+        code: code
+      };
+      if (cmdType !== '!respdel' && time) {
+        payload.time = time;
+      }
+
+      fetch('/api/bot/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) {
+          resultDiv.className = 'cmd-result error';
+          resultDiv.textContent = data.error;
+          if (data.error === 'Senha incorreta') {
+            cmdAuthed = false;
+            cmdPassword = '';
+            document.getElementById('cmdBtn').classList.remove('authed');
+            document.getElementById('cmdAuthStep').style.display = 'block';
+            document.getElementById('cmdFormStep').style.display = 'none';
+          }
+        } else {
+          resultDiv.className = 'cmd-result success';
+          var responseText = 'Comando: ' + data.command + '\\n\\n';
+          if (data.response && data.response.length > 0) {
+            responseText += data.response.join('\\n');
+          }
+          resultDiv.textContent = responseText;
+        }
+      })
+      .catch(function(err) {
+        resultDiv.className = 'cmd-result error';
+        resultDiv.textContent = 'Erro: ' + err.message;
+      })
+      .finally(function() {
+        sendBtn.disabled = false;
+        cmdTypeChanged(); // restore button text
+      });
+    }
 
     // --- Theme toggle ---
     function toggleTheme() {
@@ -1617,6 +2073,20 @@ function renderHTML(
     closeModal = function() {
       modalOpen = false;
       _origCloseModal();
+      scheduleRefresh();
+    };
+
+    // Override openCmdModal/closeCmdModal to also track modal state for refresh pause
+    var _origOpenCmdModal = openCmdModal;
+    openCmdModal = function() {
+      modalOpen = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      _origOpenCmdModal();
+    };
+    var _origCloseCmdModal = closeCmdModal;
+    closeCmdModal = function() {
+      modalOpen = false;
+      _origCloseCmdModal();
       scheduleRefresh();
     };
 
@@ -3516,6 +3986,104 @@ async function handleRequest(
         res.writeHead(200, corsH);
         res.end(JSON.stringify({ error: debugErr.message, bridgeUrl: process.env.BRIDGE_URL, tsMode: process.env.TS_MODE }));
       }
+      return;
+    }
+
+    // --- Bot Command API (password-protected) ---
+    if (url === "/api/bot/command" && req.method === "POST") {
+      const corsHeaders = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
+      let body = "";
+      req.on("data", (chunk: Buffer) => body += chunk.toString());
+      req.on("end", async () => {
+        try {
+          const payload = JSON.parse(body);
+          const { password, command, code, time } = payload;
+
+          if (!password || !command || !code) {
+            res.writeHead(400, corsHeaders);
+            res.end(JSON.stringify({ error: "Campos obrigatorios: password, command, code" }));
+            return;
+          }
+
+          // Validate password
+          if (!verifyBotPassword(password)) {
+            res.writeHead(401, corsHeaders);
+            res.end(JSON.stringify({ error: "Senha incorreta" }));
+            return;
+          }
+
+          // Auth-only check (for frontend authentication)
+          if (code === "__auth__") {
+            res.writeHead(200, corsHeaders);
+            res.end(JSON.stringify({ success: true, auth: true }));
+            return;
+          }
+
+          // Validate command type
+          const validCommands = ["!resp", "!respnext", "!respdel"];
+          if (!validCommands.includes(command)) {
+            res.writeHead(400, corsHeaders);
+            res.end(JSON.stringify({ error: "Comando invalido. Use: !resp, !respnext, !respdel" }));
+            return;
+          }
+
+          // Validate code format (2-4 alphanumeric chars)
+          if (!/^[a-zA-Z0-9]{2,4}$/.test(code)) {
+            res.writeHead(400, corsHeaders);
+            res.end(JSON.stringify({ error: "Codigo de respawn invalido" }));
+            return;
+          }
+
+          // Build the full command message
+          let fullCommand = `${command} ${code}`;
+          if (command !== "!respdel" && time) {
+            // Validate time format (h:mm or hh:mm)
+            if (!/^\d{1,2}:\d{2}$/.test(time)) {
+              res.writeHead(400, corsHeaders);
+              res.end(JSON.stringify({ error: "Formato de tempo invalido. Use h:mm ou hh:mm" }));
+              return;
+            }
+            // Validate max 2:30
+            const [h, m] = time.split(":").map(Number);
+            const totalMin = h * 60 + m;
+            if (totalMin > 150) {
+              res.writeHead(400, corsHeaders);
+              res.end(JSON.stringify({ error: "Tempo maximo permitido: 2:30" }));
+              return;
+            }
+            if (totalMin < 1) {
+              res.writeHead(400, corsHeaders);
+              res.end(JSON.stringify({ error: "Tempo minimo: 0:01" }));
+              return;
+            }
+            fullCommand += `,${time}`;
+          }
+
+          console.log(`[BotCmd] Sending: ${fullCommand}`);
+          const result = await sendBotCommand(fullCommand);
+
+          res.writeHead(200, corsHeaders);
+          res.end(JSON.stringify({
+            success: result.success,
+            command: fullCommand,
+            response: result.response,
+          }));
+        } catch (err: any) {
+          res.writeHead(500, corsHeaders);
+          res.end(JSON.stringify({ error: "Erro interno: " + (err?.message || "unknown") }));
+        }
+      });
+      return;
+    }
+
+    // Handle CORS preflight for bot command
+    if (url === "/api/bot/command" && req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      });
+      res.end();
       return;
     }
 
