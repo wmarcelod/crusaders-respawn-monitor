@@ -558,6 +558,7 @@ function renderHTML(
           ${hasBotQueue ? freeAt + ' <span class="queue-indicator">+fila</span>' : e.nexts > 0 ? '<span class="queue-indicator">+' + e.nexts + ' fila</span>' : freeAt}
         </td>
         <td class="nexts">${filaHtml}</td>
+        <td class="cmd-actions-cell"><button class="row-cmd-btn next-btn" onclick="event.stopPropagation();showCmdAction('!respnext','${escapeHtml(e.code)}','${escapeHtml(e.name)}',this)" title="Entrar na fila">&#9654; Next</button><button class="row-cmd-btn del-btn" onclick="event.stopPropagation();showCmdAction('!respdel','${escapeHtml(e.code)}','${escapeHtml(e.name)}',this)" title="Cancelar reserva">&#10005;</button></td>
       </tr>`;
     })
     .join("");
@@ -601,7 +602,7 @@ function renderHTML(
   // Free respawns
   const freeRows = data.freeRespawns
     .map(
-      (r) => `<tr data-code="${escapeHtml(r.code)}"><td><span class="fav-star" data-code="${escapeHtml(r.code)}" onclick="toggleFavorite('${escapeHtml(r.code)}')">★</span></td><td class="code">${escapeHtml(r.code)}</td><td>${escapeHtml(r.name)}</td></tr>`
+      (r) => `<tr data-code="${escapeHtml(r.code)}"><td><span class="fav-star" data-code="${escapeHtml(r.code)}" onclick="toggleFavorite('${escapeHtml(r.code)}')">★</span></td><td class="code">${escapeHtml(r.code)}</td><td>${escapeHtml(r.name)}</td><td class="cmd-actions-cell"><button class="row-cmd-btn claim-btn" onclick="event.stopPropagation();showCmdAction('!resp','${escapeHtml(r.code)}','${escapeHtml(r.name)}',this)" title="Ocupar respawn">&#9654; Ocupar</button></td></tr>`
     )
     .join("");
 
@@ -1223,6 +1224,145 @@ function renderHTML(
     body.light .cmd-form select, body.light .cmd-form input { background: #fff; border-color: #e5e7eb; color: #111827; }
     body.light .cmd-result { background: #fff; border-color: #e5e7eb; color: #6b7280; }
 
+    /* Inline row action buttons - hidden until authenticated */
+    .cmd-actions-cell { display: none; width: 0; padding: 0 !important; overflow: hidden; }
+    body.cmd-authed .cmd-actions-cell { display: table-cell; width: auto; padding: 6px 8px !important; overflow: visible; }
+
+    .row-cmd-btn {
+      background: #1e2030;
+      border: 1px solid #2e3150;
+      color: #a1a1aa;
+      padding: 3px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.72em;
+      font-weight: 600;
+      transition: all 0.15s;
+      white-space: nowrap;
+      margin-right: 3px;
+    }
+    .row-cmd-btn:hover { transform: scale(1.05); }
+    .row-cmd-btn.claim-btn { color: #6ee7b7; border-color: #065f46; }
+    .row-cmd-btn.claim-btn:hover { background: #065f46; color: #fff; }
+    .row-cmd-btn.next-btn { color: #93c5fd; border-color: #1e3a5f; }
+    .row-cmd-btn.next-btn:hover { background: #1e3a5f; color: #fff; }
+    .row-cmd-btn.del-btn { color: #fca5a5; border-color: #7f1d1d; padding: 3px 6px; font-size: 0.65em; }
+    .row-cmd-btn.del-btn:hover { background: #7f1d1d; color: #fff; }
+
+    body.light .row-cmd-btn { background: #f9fafb; border-color: #e5e7eb; }
+    body.light .row-cmd-btn.claim-btn { color: #059669; border-color: #d1fae5; }
+    body.light .row-cmd-btn.claim-btn:hover { background: #d1fae5; color: #065f46; }
+    body.light .row-cmd-btn.next-btn { color: #3b82f6; border-color: #dbeafe; }
+    body.light .row-cmd-btn.next-btn:hover { background: #dbeafe; color: #1e40af; }
+    body.light .row-cmd-btn.del-btn { color: #ef4444; border-color: #fee2e2; }
+    body.light .row-cmd-btn.del-btn:hover { background: #fee2e2; color: #991b1b; }
+
+    /* Floating action panel */
+    .cmd-action-panel {
+      position: fixed;
+      z-index: 1100;
+      background: #111322;
+      border: 1px solid #2e3150;
+      border-radius: 12px;
+      padding: 14px 16px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      width: 280px;
+    }
+    .cmd-action-panel .cap-title {
+      font-size: 0.85em;
+      font-weight: 700;
+      color: #f4f4f5;
+      margin-bottom: 4px;
+    }
+    .cmd-action-panel .cap-subtitle {
+      font-size: 0.72em;
+      color: #818cf8;
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 10px;
+    }
+    .cmd-action-panel .cap-time-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .cmd-action-panel .cap-time-row input {
+      background: #0b0d17;
+      border: 1px solid #2e3150;
+      color: #f4f4f5;
+      padding: 6px 8px;
+      border-radius: 6px;
+      font-size: 0.82em;
+      flex: 1;
+      min-width: 0;
+    }
+    .cmd-action-panel .cap-time-row input:focus { outline: none; border-color: #818cf8; }
+    .cmd-action-panel .cap-time-row span { color: #52525b; font-size: 0.75em; flex-shrink: 0; }
+    .cmd-action-panel .cap-calc {
+      font-size: 0.78em;
+      color: #34d399;
+      font-family: 'JetBrains Mono', monospace;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    .cmd-action-panel .cap-calc.warn { color: #fbbf24; }
+    .cmd-action-panel .cap-btns {
+      display: flex;
+      gap: 6px;
+    }
+    .cmd-action-panel .cap-send {
+      flex: 1;
+      background: #312e81;
+      color: #c4b5fd;
+      border: 1px solid #4338ca;
+      padding: 7px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.82em;
+      font-weight: 700;
+      transition: all 0.15s;
+    }
+    .cmd-action-panel .cap-send:hover { background: #3730a3; }
+    .cmd-action-panel .cap-send:disabled { opacity: 0.5; cursor: not-allowed; }
+    .cmd-action-panel .cap-send.resp { background: #065f46; color: #6ee7b7; border-color: #059669; }
+    .cmd-action-panel .cap-send.resp:hover { background: #047857; }
+    .cmd-action-panel .cap-send.next { background: #1e3a5f; color: #93c5fd; border-color: #3b82f6; }
+    .cmd-action-panel .cap-send.next:hover { background: #1e40af; }
+    .cmd-action-panel .cap-send.del { background: #7f1d1d; color: #fca5a5; border-color: #dc2626; }
+    .cmd-action-panel .cap-send.del:hover { background: #991b1b; }
+    .cmd-action-panel .cap-close {
+      background: #1e2030;
+      color: #71717a;
+      border: 1px solid #2e3150;
+      padding: 7px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.82em;
+      transition: all 0.15s;
+    }
+    .cmd-action-panel .cap-close:hover { background: #2e3150; color: #f4f4f5; }
+    .cmd-action-panel .cap-result {
+      margin-top: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75em;
+      padding: 8px;
+      border-radius: 6px;
+      background: #0b0d17;
+      border: 1px solid #2e3150;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 100px;
+      overflow-y: auto;
+    }
+    .cmd-action-panel .cap-result.ok { border-color: #059669; color: #6ee7b7; }
+    .cmd-action-panel .cap-result.err { border-color: #dc2626; color: #fca5a5; }
+
+    body.light .cmd-action-panel { background: #fff; border-color: #e5e7eb; box-shadow: 0 12px 40px rgba(0,0,0,0.12); }
+    body.light .cmd-action-panel .cap-title { color: #111827; }
+    body.light .cmd-action-panel .cap-subtitle { color: #6366f1; }
+    body.light .cmd-action-panel .cap-time-row input { background: #f9fafb; border-color: #e5e7eb; color: #111827; }
+    body.light .cmd-action-panel .cap-result { background: #f9fafb; border-color: #e5e7eb; }
+
     .theme-toggle-btn {
       background: #111322;
       border: 1px solid #2e3150;
@@ -1408,10 +1548,11 @@ function renderHTML(
           <th class="sortable" data-sort="remaining">Restante <span class="sort-arrow"></span></th>
           <th class="sortable" data-sort="exit">Livre as <span class="sort-arrow"></span></th>
           <th>Fila</th>
+          <th class="cmd-actions-cell">Acao</th>
         </tr>
       </thead>
       <tbody>
-        ${rows || '<tr><td colspan="8" style="text-align:center;padding:40px;color:#52525b;">Nenhum respawn ocupado</td></tr>'}
+        ${rows || '<tr><td colspan="9" style="text-align:center;padding:40px;color:#52525b;">Nenhum respawn ocupado</td></tr>'}
       </tbody>
     </table>
 
@@ -1446,9 +1587,9 @@ function renderHTML(
       </div>
       <div id="freeTable" class="free-table" style="display:none;">
         <table id="freeRespawnTable">
-          <thead><tr><th style="width:30px">★</th><th>Code</th><th>Respawn</th></tr></thead>
+          <thead><tr><th style="width:30px">★</th><th>Code</th><th>Respawn</th><th class="cmd-actions-cell">Acao</th></tr></thead>
           <tbody>
-            ${freeRows || '<tr><td colspan="3" style="text-align:center;color:#52525b;">Todos ocupados</td></tr>'}
+            ${freeRows || '<tr><td colspan="4" style="text-align:center;color:#52525b;">Todos ocupados</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -1523,6 +1664,25 @@ function renderHTML(
 
       <button class="close-btn" onclick="closeCmdModal()">Fechar</button>
     </div>
+  </div>
+
+  <!-- Floating action panel for inline commands -->
+  <div id="cmdActionPanel" class="cmd-action-panel" style="display:none;" onclick="event.stopPropagation();">
+    <div class="cap-title" id="capTitle"></div>
+    <div class="cap-subtitle" id="capSubtitle"></div>
+    <div id="capTimeSection">
+      <div class="cap-time-row">
+        <input type="text" id="capTimeManual" placeholder="h:mm" maxlength="5">
+        <span>ou ate</span>
+        <input type="time" id="capTimeUntil" onchange="calcCapTimeUntil()">
+      </div>
+      <div class="cap-calc" id="capTimeCalc" style="display:none;"></div>
+    </div>
+    <div class="cap-btns">
+      <button class="cap-send" id="capSendBtn" onclick="capSend()">Enviar</button>
+      <button class="cap-close" onclick="closeCmdActionPanel()">&#10005;</button>
+    </div>
+    <div id="capResult" class="cap-result" style="display:none;"></div>
   </div>
 
   <script>
@@ -1606,7 +1766,7 @@ function renderHTML(
 
     // Close modal on ESC
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape') { closeModal(); closeCmdModal(); }
+      if (e.key === 'Escape') { closeModal(); closeCmdModal(); closeCmdActionPanel(); }
     });
 
     // --- Bot Command Modal ---
@@ -1652,6 +1812,7 @@ function renderHTML(
         document.getElementById('cmdAuthStep').style.display = 'none';
         document.getElementById('cmdFormStep').style.display = 'block';
         document.getElementById('cmdBtn').classList.add('authed');
+        document.body.classList.add('cmd-authed');
         document.getElementById('cmdAuthError').style.display = 'none';
         // Clear any previous result
         document.getElementById('cmdResult').style.display = 'none';
@@ -1772,6 +1933,7 @@ function renderHTML(
             cmdAuthed = false;
             cmdPassword = '';
             document.getElementById('cmdBtn').classList.remove('authed');
+            document.body.classList.remove('cmd-authed');
             document.getElementById('cmdAuthStep').style.display = 'block';
             document.getElementById('cmdFormStep').style.display = 'none';
           }
@@ -1791,6 +1953,183 @@ function renderHTML(
       .finally(function() {
         sendBtn.disabled = false;
         cmdTypeChanged(); // restore button text
+      });
+    }
+
+    // --- Inline action panel (floating) ---
+    var capState = { command: '', code: '', name: '' };
+
+    function showCmdAction(command, code, name, btnEl) {
+      if (!cmdAuthed) {
+        openCmdModal();
+        return;
+      }
+
+      capState.command = command;
+      capState.code = code;
+      capState.name = name;
+
+      var panel = document.getElementById('cmdActionPanel');
+      var titleEl = document.getElementById('capTitle');
+      var subtitleEl = document.getElementById('capSubtitle');
+      var timeSection = document.getElementById('capTimeSection');
+      var sendBtn = document.getElementById('capSendBtn');
+      var resultEl = document.getElementById('capResult');
+
+      // Reset state
+      document.getElementById('capTimeManual').value = '';
+      document.getElementById('capTimeUntil').value = '';
+      document.getElementById('capTimeCalc').style.display = 'none';
+      resultEl.style.display = 'none';
+      sendBtn.disabled = false;
+
+      // Configure by command type
+      if (command === '!resp') {
+        titleEl.textContent = 'Ocupar ' + name;
+        subtitleEl.textContent = code.toUpperCase() + ' - !resp';
+        timeSection.style.display = 'block';
+        sendBtn.textContent = '\\u25B6 Ocupar';
+        sendBtn.className = 'cap-send resp';
+      } else if (command === '!respnext') {
+        titleEl.textContent = 'Entrar na fila - ' + name;
+        subtitleEl.textContent = code.toUpperCase() + ' - !respnext';
+        timeSection.style.display = 'block';
+        sendBtn.textContent = '\\u23ED Next';
+        sendBtn.className = 'cap-send next';
+      } else {
+        titleEl.textContent = 'Cancelar - ' + name;
+        subtitleEl.textContent = code.toUpperCase() + ' - !respdel';
+        timeSection.style.display = 'none';
+        sendBtn.textContent = '\\u2715 Cancelar';
+        sendBtn.className = 'cap-send del';
+      }
+
+      // Position near button
+      var rect = btnEl.getBoundingClientRect();
+      var panelW = 280;
+      var left = rect.left;
+      var top = rect.bottom + 6;
+
+      // Keep panel on screen
+      if (left + panelW > window.innerWidth - 10) {
+        left = window.innerWidth - panelW - 10;
+      }
+      if (left < 10) left = 10;
+      if (top + 250 > window.innerHeight) {
+        top = rect.top - 250;
+        if (top < 10) top = 10;
+      }
+
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+      panel.style.display = 'block';
+
+      // Pause refresh
+      modalOpen = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+    }
+
+    function closeCmdActionPanel() {
+      document.getElementById('cmdActionPanel').style.display = 'none';
+      modalOpen = false;
+      scheduleRefresh();
+    }
+
+    // Close action panel when clicking outside
+    document.addEventListener('click', function(e) {
+      var panel = document.getElementById('cmdActionPanel');
+      if (panel.style.display === 'block' && !panel.contains(e.target)) {
+        closeCmdActionPanel();
+      }
+    });
+
+    function calcCapTimeUntil() {
+      var timeInput = document.getElementById('capTimeUntil').value;
+      var calcDiv = document.getElementById('capTimeCalc');
+      var manualInput = document.getElementById('capTimeManual');
+
+      if (!timeInput) { calcDiv.style.display = 'none'; return; }
+
+      var parts = timeInput.split(':');
+      var targetH = parseInt(parts[0]);
+      var targetM = parseInt(parts[1]);
+      var now = new Date();
+      var target = new Date();
+      target.setHours(targetH, targetM, 0, 0);
+      if (target <= now) target.setDate(target.getDate() + 1);
+
+      var diffMin = Math.ceil((target - now) / 60000);
+      var h = Math.floor(diffMin / 60);
+      var m = diffMin % 60;
+      var timeStr = h + ':' + String(m).padStart(2, '0');
+
+      calcDiv.style.display = 'block';
+      if (diffMin > 150) {
+        calcDiv.className = 'cap-calc warn';
+        calcDiv.textContent = timeStr + ' (max 2:30!)';
+        manualInput.value = '2:30';
+      } else if (diffMin < 1) {
+        calcDiv.className = 'cap-calc warn';
+        calcDiv.textContent = 'Muito proximo!';
+      } else {
+        calcDiv.className = 'cap-calc';
+        calcDiv.textContent = timeStr;
+        manualInput.value = timeStr;
+      }
+    }
+
+    function capSend() {
+      var sendBtn = document.getElementById('capSendBtn');
+      var resultEl = document.getElementById('capResult');
+      var time = document.getElementById('capTimeManual').value.trim();
+
+      sendBtn.disabled = true;
+      sendBtn.textContent = '...';
+      resultEl.style.display = 'block';
+      resultEl.className = 'cap-result';
+      resultEl.textContent = 'Enviando...';
+
+      var payload = {
+        password: cmdPassword,
+        command: capState.command,
+        code: capState.code
+      };
+      if (capState.command !== '!respdel' && time) {
+        payload.time = time;
+      }
+
+      fetch('/api/bot/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) {
+          resultEl.className = 'cap-result err';
+          resultEl.textContent = data.error;
+        } else {
+          resultEl.className = 'cap-result ok';
+          var text = data.response ? data.response.join('\\n') : 'OK';
+          resultEl.textContent = text;
+          // Auto-close after 3s on success
+          setTimeout(function() {
+            if (document.getElementById('cmdActionPanel').style.display === 'block') {
+              closeCmdActionPanel();
+            }
+          }, 3000);
+        }
+      })
+      .catch(function(err) {
+        resultEl.className = 'cap-result err';
+        resultEl.textContent = 'Erro: ' + err.message;
+      })
+      .finally(function() {
+        sendBtn.disabled = false;
+        // Restore button text
+        if (capState.command === '!resp') sendBtn.textContent = '\\u25B6 Ocupar';
+        else if (capState.command === '!respnext') sendBtn.textContent = '\\u23ED Next';
+        else sendBtn.textContent = '\\u2715 Cancelar';
       });
     }
 
