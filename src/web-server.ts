@@ -1537,17 +1537,58 @@ function renderHTML(
       });
     });
 
-    // --- Smart auto-refresh: pauses when modal is open ---
+    // --- Smart auto-refresh via AJAX (no page reload, preserves scroll) ---
     var refreshInterval = 5000;
     var refreshTimer = null;
     var modalOpen = false;
+
+    function doAjaxRefresh() {
+      fetch('/?_t=' + Date.now(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        .then(function(r) { return r.text(); })
+        .then(function(html) {
+          var parser = new DOMParser();
+          var doc = parser.parseFromString(html, 'text/html');
+          // Update stat cards
+          var newStats = doc.querySelectorAll('.stat-card');
+          var oldStats = document.querySelectorAll('.stat-card');
+          newStats.forEach(function(ns, i) { if (oldStats[i]) oldStats[i].innerHTML = ns.innerHTML; });
+          // Update meta info (timestamp, etc)
+          var newMeta = doc.querySelector('.meta');
+          var oldMeta = document.querySelector('.meta');
+          if (newMeta && oldMeta) oldMeta.innerHTML = newMeta.innerHTML;
+          // Update main respawn table body
+          var newMainTbody = doc.querySelector('#respawnTable tbody');
+          var oldMainTbody = document.querySelector('#respawnTable tbody');
+          if (newMainTbody && oldMainTbody) oldMainTbody.innerHTML = newMainTbody.innerHTML;
+          // Update free reservations section
+          var newFreeRes = doc.getElementById('freeResTable');
+          var oldFreeRes = document.getElementById('freeResTable');
+          if (newFreeRes && oldFreeRes) {
+            var newFreeResParent = newFreeRes.parentElement;
+            var oldFreeResParent = oldFreeRes.parentElement;
+            if (newFreeResParent && oldFreeResParent) oldFreeResParent.innerHTML = newFreeResParent.innerHTML;
+          }
+          // Update free respawns table body
+          var newFreeTbody = doc.querySelector('#freeRespawnTable tbody');
+          var oldFreeTbody = document.querySelector('#freeRespawnTable tbody');
+          if (newFreeTbody && oldFreeTbody) oldFreeTbody.innerHTML = newFreeTbody.innerHTML;
+          // Update free respawns count in section title
+          var newFreeCount = doc.querySelectorAll('.collapsible .count');
+          var oldFreeCount = document.querySelectorAll('.collapsible .count');
+          newFreeCount.forEach(function(nc, i) { if (oldFreeCount[i]) oldFreeCount[i].textContent = nc.textContent; });
+          // Re-apply stars and filters
+          updateFavStars();
+          applyFilters();
+        })
+        .catch(function(err) { console.warn('[Refresh] Failed:', err); })
+        .finally(function() { scheduleRefresh(); });
+    }
 
     function scheduleRefresh() {
       if (refreshTimer) clearTimeout(refreshTimer);
       refreshTimer = setTimeout(function() {
         if (!modalOpen) {
-          saveState();
-          window.location.reload();
+          doAjaxRefresh();
         } else {
           scheduleRefresh();
         }
@@ -1558,8 +1599,10 @@ function renderHTML(
     function refreshPage() {
       var btn = document.getElementById('refreshBtn');
       if (btn) { btn.classList.add('loading'); btn.innerHTML = '&#x21bb; Atualizando...'; }
-      saveState();
-      window.location.reload();
+      doAjaxRefresh();
+      setTimeout(function() {
+        if (btn) { btn.classList.remove('loading'); btn.innerHTML = '&#x21bb; Atualizar'; }
+      }, 1000);
     }
 
     // Override showQueueInfo to track modal state
